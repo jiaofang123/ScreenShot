@@ -22,7 +22,7 @@ tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 xcap = { version = "0.9.6", features = ["wgc"] }
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 parking_lot = "0.12"
 arboard = "3.6.1"
 tauri-plugin-global-shortcut = "2.3.2"

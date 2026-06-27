@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    ffi::c_void,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -18,14 +19,60 @@ use tauri::{
 use xcap::Monitor;
 
 use crate::{
-    image_utils::image_to_data_url,
+    image_utils::{image_to_data_url, image_to_preview_data_url},
     stitch::{ScrollStitcher, StitchOutcome},
 };
+
+const CURSOR_HIDE_SETTLE: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 pub struct AppState {
     snapshots: Mutex<HashMap<u32, MonitorSnapshot>>,
     long_capture_cancel: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+struct CursorHideGuard {
+    #[cfg(target_os = "macos")]
+    display_ids: Vec<u32>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+struct CursorPositionGuard {
+    #[cfg(target_os = "macos")]
+    original: Option<CGPoint>,
+}
+
+impl Drop for CursorHideGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            for display_id in self.display_ids.iter().rev() {
+                unsafe {
+                    CGDisplayShowCursor(*display_id);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CursorPositionGuard {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(original) = self.original {
+                unsafe {
+                    let _ = CGWarpMouseCursorPosition(original);
+                }
+            }
+        }
+    }
 }
 
 struct MonitorSnapshot {
@@ -36,6 +83,7 @@ struct MonitorSnapshot {
     width: u32,
     height: u32,
     scale_factor: f32,
+    preview_data_url: String,
     image: RgbaImage,
 }
 
@@ -77,6 +125,22 @@ pub struct CaptureRegion {
     height: u32,
 }
 
+#[cfg(target_os = "macos")]
+#[link(name = "ApplicationServices", kind = "framework")]
+unsafe extern "C" {
+    fn CGDisplayHideCursor(display: u32) -> i32;
+    fn CGDisplayShowCursor(display: u32) -> i32;
+    fn CGEventCreate(source: *const c_void) -> *mut c_void;
+    fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
+    fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFRelease(cf: *const c_void);
+}
+
 #[tauri::command]
 pub async fn begin_capture(app: AppHandle) -> Result<(), String> {
     begin_capture_impl(app).await
@@ -92,12 +156,9 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
         let _ = main.hide();
     }
 
-    let snapshots = async_runtime::spawn_blocking(|| {
-        thread::sleep(Duration::from_millis(160));
-        capture_all_monitors()
-    })
-    .await
-    .map_err(|error| format!("截图任务异常：{error}"))??;
+    let snapshots = async_runtime::spawn_blocking(capture_all_monitors)
+        .await
+        .map_err(|error| format!("截图任务异常：{error}"))??;
 
     let window_specs: Vec<(u32, i32, i32, u32, u32)> = snapshots
         .values()
@@ -154,7 +215,7 @@ pub fn get_overlay_snapshot(
         width: snapshot.width,
         height: snapshot.height,
         scale_factor: snapshot.scale_factor,
-        data_url: image_to_data_url(&snapshot.image)?,
+        data_url: snapshot.preview_data_url.clone(),
     })
 }
 
@@ -261,6 +322,7 @@ fn run_long_capture(
 
     let mut stitcher = ScrollStitcher::new(first_frame);
     let mut failures = 0_u32;
+    let _cursor_guard = hide_cursor_for_monitor(&monitor);
     emit_long_status(
         &app,
         "capturing",
@@ -270,7 +332,7 @@ fn run_long_capture(
 
     while !cancel.load(Ordering::Acquire) {
         thread::sleep(Duration::from_millis(240));
-        let frame = match monitor.capture_region(region.x, region.y, region.width, region.height) {
+        let frame = match capture_live_region(&monitor, &region) {
             Ok(frame) => frame,
             Err(error) => {
                 failures += 1;
@@ -310,14 +372,44 @@ fn run_long_capture(
     }
 }
 
+#[cfg(target_os = "macos")]
+fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<RgbaImage, String> {
+    let image = monitor
+        .capture_image()
+        .map_err(|error| format!("无法捕获屏幕：{error}"))?;
+    crop_image_region(&image, region).ok_or_else(|| {
+        format!(
+            "框选区域超出当前屏幕范围：({}, {}, {}, {}) / {}x{}",
+            region.x,
+            region.y,
+            region.width,
+            region.height,
+            image.width(),
+            image.height()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<RgbaImage, String> {
+    monitor
+        .capture_region(region.x, region.y, region.width, region.height)
+        .map_err(|error| format!("无法捕获屏幕区域：{error}"))
+}
+
 fn capture_all_monitors() -> Result<HashMap<u32, MonitorSnapshot>, String> {
     let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
+    let _cursor_guard = hide_cursor_for_monitors(&monitors);
+    let _cursor_position_guard = move_cursor_to_safe_edge(&monitors);
+    wait_for_cursor_hide();
     let mut snapshots = HashMap::new();
     for monitor in monitors {
         let id = monitor.id().map_err(|error| error.to_string())?;
         let image = monitor
             .capture_image()
             .map_err(|error| format!("无法捕获显示器 {id}：{error}"))?;
+        let scale_factor = monitor.scale_factor().unwrap_or(1.0);
+        let preview_data_url = image_to_preview_data_url(&image, scale_factor)?;
         snapshots.insert(
             id,
             MonitorSnapshot {
@@ -330,7 +422,8 @@ fn capture_all_monitors() -> Result<HashMap<u32, MonitorSnapshot>, String> {
                 y: monitor.y().map_err(|error| error.to_string())?,
                 width: image.width(),
                 height: image.height(),
-                scale_factor: monitor.scale_factor().unwrap_or(1.0),
+                scale_factor,
+                preview_data_url,
                 image,
             },
         );
@@ -355,14 +448,110 @@ fn crop_snapshot(state: &AppState, region: &CaptureRegion) -> Result<RgbaImage, 
     if right > snapshot.width || bottom > snapshot.height {
         return Err("框选区域超出显示器范围".to_string());
     }
-    Ok(imageops::crop_imm(
-        &snapshot.image,
-        region.x,
-        region.y,
-        region.width,
-        region.height,
-    )
-    .to_image())
+    crop_image_region(&snapshot.image, region).ok_or_else(|| "框选区域超出显示器范围".to_string())
+}
+
+fn crop_image_region(image: &RgbaImage, region: &CaptureRegion) -> Option<RgbaImage> {
+    let right = region.x.checked_add(region.width)?;
+    let bottom = region.y.checked_add(region.height)?;
+    if right > image.width() || bottom > image.height() {
+        return None;
+    }
+    Some(imageops::crop_imm(image, region.x, region.y, region.width, region.height).to_image())
+}
+
+#[cfg(target_os = "macos")]
+fn hide_cursor_for_monitors(monitors: &[Monitor]) -> CursorHideGuard {
+    let mut display_ids = Vec::new();
+    if unsafe { CGDisplayHideCursor(0) == 0 } {
+        display_ids.push(0);
+    }
+    display_ids.extend(
+        monitors
+            .iter()
+            .filter_map(|monitor| monitor.id().ok())
+            .filter(|display_id| unsafe { CGDisplayHideCursor(*display_id) == 0 }),
+    );
+    CursorHideGuard { display_ids }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_cursor_for_monitors(_monitors: &[Monitor]) -> CursorHideGuard {
+    CursorHideGuard {}
+}
+
+fn hide_cursor_for_monitor(monitor: &Monitor) -> CursorHideGuard {
+    #[cfg(target_os = "macos")]
+    {
+        let mut display_ids = Vec::new();
+        if unsafe { CGDisplayHideCursor(0) == 0 } {
+            display_ids.push(0);
+        }
+        display_ids.extend(
+            monitor
+                .id()
+                .ok()
+                .filter(|display_id| unsafe { CGDisplayHideCursor(*display_id) == 0 }),
+        );
+        CursorHideGuard { display_ids }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = monitor;
+        CursorHideGuard {}
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn move_cursor_to_safe_edge(monitors: &[Monitor]) -> CursorPositionGuard {
+    let original = current_cursor_position();
+    if let Some(target) = safe_edge_position(monitors) {
+        unsafe {
+            let _ = CGWarpMouseCursorPosition(target);
+        }
+    }
+    CursorPositionGuard { original }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn move_cursor_to_safe_edge(_monitors: &[Monitor]) -> CursorPositionGuard {
+    CursorPositionGuard {}
+}
+
+#[cfg(target_os = "macos")]
+fn current_cursor_position() -> Option<CGPoint> {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return None;
+        }
+        let position = CGEventGetLocation(event);
+        CFRelease(event.cast());
+        Some(position)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn safe_edge_position(monitors: &[Monitor]) -> Option<CGPoint> {
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let x = monitor.x().ok()? as f64;
+            let y = monitor.y().ok()? as f64;
+            let width = monitor.width().ok()? as f64;
+            let height = monitor.height().ok()? as f64;
+            Some(CGPoint {
+                x: x + width - 2.0,
+                y: y + height - 2.0,
+            })
+        })
+        .max_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y)))
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_cursor_hide() {
+    thread::sleep(CURSOR_HIDE_SETTLE);
 }
 
 fn deliver_image(app: &AppHandle, image: RgbaImage, capture_kind: &str) -> Result<(), String> {

@@ -64,6 +64,17 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
   const pointerStartRef = useRef<Point>({ x: 0, y: 0 });
   const panStartRef = useRef<Pan>({ x: 0, y: 0 });
 
+  useEffect(() => {
+    setAnnotations([]);
+    setRedoStack([]);
+    setDraft(null);
+    setDrawing(false);
+    setPanning(false);
+    setSpacePressed(false);
+    setProcessing(false);
+    setInitialized(false);
+  }, [capture.dataUrl]);
+
   const fitWidth = useCallback(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
