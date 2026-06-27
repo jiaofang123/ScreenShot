@@ -131,7 +131,7 @@ function OverlayApp() {
   }
 
   if (!snapshot) {
-    return null;
+    return <div className="overlay-loading">正在准备截图…</div>;
   }
 
   const toolbarLeft = selection

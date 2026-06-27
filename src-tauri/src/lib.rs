@@ -131,6 +131,7 @@ pub fn run() {
                 tray = tray.icon(icon);
             }
             tray.build(app)?;
+            capture::request_screen_capture_permission_at_launch(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

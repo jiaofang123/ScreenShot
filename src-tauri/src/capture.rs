@@ -132,6 +132,8 @@ unsafe extern "C" {
     fn CGDisplayShowCursor(display: u32) -> i32;
     fn CGEventCreate(source: *const c_void) -> *mut c_void;
     fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGRequestScreenCaptureAccess() -> bool;
     fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
 }
 
@@ -150,6 +152,8 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
     if app.state::<AppState>().long_capture_cancel.lock().is_some() {
         return Err("长截图正在进行，请先按快捷键停止".to_string());
     }
+
+    ensure_screen_capture_permission(&app)?;
 
     close_overlay_windows(&app);
     if let Some(main) = app.get_webview_window("main") {
@@ -174,6 +178,9 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
         .collect();
     *app.state::<AppState>().snapshots.lock() = snapshots;
 
+    let eager_show_overlay = should_eager_show_overlay();
+    let mut focused_overlay = false;
+
     for (id, x, y, width, height) in window_specs {
         let label = format!("overlay-{id}");
         let url = WebviewUrl::App(
@@ -181,13 +188,17 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
                 .parse()
                 .map_err(|error| format!("无法创建框选页面地址：{error}"))?,
         );
-        let window = WebviewWindowBuilder::new(&app, &label, url)
+        let mut builder = WebviewWindowBuilder::new(&app, &label, url)
             .title("ScreenShot Capture")
             .decorations(false)
             .resizable(false)
             .always_on_top(true)
             .skip_taskbar(true)
-            .visible(false)
+            .visible(false);
+        if cfg!(target_os = "macos") {
+            builder = builder.visible_on_all_workspaces(true);
+        }
+        let window = builder
             .build()
             .map_err(|error| format!("无法创建框选窗口：{error}"))?;
         window
@@ -196,6 +207,17 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
         window
             .set_size(Size::Physical(PhysicalSize::new(width, height)))
             .map_err(|error| format!("无法调整框选窗口：{error}"))?;
+        if eager_show_overlay {
+            window
+                .show()
+                .map_err(|error| format!("无法显示框选窗口：{error}"))?;
+            if !focused_overlay {
+                window
+                    .set_focus()
+                    .map_err(|error| format!("无法聚焦框选窗口：{error}"))?;
+                focused_overlay = true;
+            }
+        }
     }
     Ok(())
 }
@@ -232,6 +254,10 @@ pub fn show_overlay_window(app: AppHandle, monitor_id: u32) -> Result<(), String
         .set_focus()
         .map_err(|error| format!("无法聚焦框选窗口：{error}"))?;
     Ok(())
+}
+
+fn should_eager_show_overlay() -> bool {
+    cfg!(target_os = "macos") && !cfg!(debug_assertions)
 }
 
 #[tauri::command]
@@ -376,7 +402,7 @@ fn run_long_capture(
 fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<RgbaImage, String> {
     let image = monitor
         .capture_image()
-        .map_err(|error| format!("无法捕获屏幕：{error}"))?;
+        .map_err(|error| screen_capture_error(format!("无法捕获屏幕：{error}")))?;
     crop_image_region(&image, region).ok_or_else(|| {
         format!(
             "框选区域超出当前屏幕范围：({}, {}, {}, {}) / {}x{}",
@@ -407,7 +433,9 @@ fn capture_all_monitors() -> Result<HashMap<u32, MonitorSnapshot>, String> {
         let id = monitor.id().map_err(|error| error.to_string())?;
         let image = monitor
             .capture_image()
-            .map_err(|error| format!("无法捕获显示器 {id}：{error}"))?;
+            .map_err(|error| {
+                screen_capture_error(format!("无法捕获显示器 {id}：{error}"))
+            })?;
         let scale_factor = monitor.scale_factor().unwrap_or(1.0);
         let preview_data_url = image_to_preview_data_url(&image, scale_factor)?;
         snapshots.insert(
@@ -572,6 +600,64 @@ fn show_main_window(app: &AppHandle) {
         let _ = main.unminimize();
         let _ = main.set_focus();
     }
+}
+
+#[cfg(target_os = "macos")]
+pub fn request_screen_capture_permission_at_launch(app: AppHandle) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(800));
+        let app_for_main_thread = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            let _ = request_screen_capture_permission_if_needed(&app_for_main_thread);
+        });
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn request_screen_capture_permission_at_launch(_app: AppHandle) {}
+
+#[cfg(target_os = "macos")]
+fn ensure_screen_capture_permission(app: &AppHandle) -> Result<(), String> {
+    if request_screen_capture_permission_if_needed(app) {
+        Ok(())
+    } else {
+        Err(
+            "需要先给 ScreenShot 开启屏幕录制权限：系统设置 > 隐私与安全性 > 录屏与系统录音。授权后请退出并重新打开 ScreenShot，再重新截图。"
+                .to_string(),
+        )
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ensure_screen_capture_permission(_app: &AppHandle) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn request_screen_capture_permission_if_needed(app: &AppHandle) -> bool {
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        return true;
+    }
+
+    show_main_window(app);
+    let _ = unsafe { CGRequestScreenCaptureAccess() };
+    unsafe { CGPreflightScreenCaptureAccess() }
+}
+
+#[cfg(target_os = "macos")]
+fn screen_capture_error(message: String) -> String {
+    if unsafe { CGPreflightScreenCaptureAccess() } {
+        message
+    } else {
+        format!(
+            "macOS 仍报告当前 ScreenShot 没有屏幕录制权限。请在系统设置里删除 ScreenShot.app 后重新添加，或重新安装后再授权。原始错误：{message}"
+        )
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn screen_capture_error(message: String) -> String {
+    message
 }
 
 fn close_overlay_windows(app: &AppHandle) {
