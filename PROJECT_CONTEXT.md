@@ -36,7 +36,7 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
 
 - `src-tauri/src/capture.rs`
   - 捕获所有显示器的冻结画面。
-  - 为每块显示器创建 `overlay-*` 框选窗口。
+  - 启动时预热每块显示器的隐藏 `overlay-*` 窗口，后续截图复用并刷新画面；会话编号阻止旧回调重新显示已取消的窗口。
   - 普通区域裁剪。
   - 长截图后台采样与生命周期。
 - `src-tauri/src/stitch.rs`
@@ -48,9 +48,12 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
   - 马赛克以块平均色实现。
   - 文字接收 webview 渲染的透明 PNG，按标注顺序进行 alpha 合成和边缘裁切。
 - `src-tauri/src/image_utils.rs`
-  - `RgbaImage` 与 PNG Data URL 互转。
+  - `RgbaImage` 与 PNG Data URL 互转，直接写入快速无损 PNG，生成缩小的 JPEG 框选预览。
+- `src-tauri/src/capture_cache.rs`
+  - 仅缓存当前截图原始像素，使用 `captureId` 校验和 `Arc` 共享；新截图或关闭编辑器后释放旧数据。
 - `src-tauri/src/lib.rs`
   - Tauri 初始化、命令注册、快捷键和托盘。
+  - `copy_capture_to_clipboard` / `save_capture` 在后台直接合成原始像素并写入系统剪贴板或 PNG 文件。
 
 ### 前端
 
@@ -67,11 +70,11 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
 2. 主窗口隐藏，Rust 等待短暂时间后捕获所有显示器。
 3. 每块显示器显示冻结画面的覆盖窗口。
 4. 用户框选后选择普通截图或长截图。
-5. 普通截图直接裁剪并发送 `capture-ready`。
-6. 长截图关闭覆盖窗口，用户缓慢向下滚动，再按相同快捷键停止。
+5. 普通截图后台裁剪、隐藏并重置覆盖窗口，缓存原始像素并发送包含 `captureId` 与预览 PNG 的 `capture-ready`。
+6. 长截图隐藏并重置覆盖窗口，用户缓慢向下滚动，再按相同快捷键停止。
 7. Rust 拼接完成后发送 `capture-ready`，主窗口进入编辑器。
-8. 前端维护矢量标注；完成时调用 `render_annotations`。
-9. 前端把返回的 PNG 写入系统剪贴板。
+8. 前端维护矢量标注；复制或保存时只发送 `captureId` 与标注数据。
+9. Rust 直接使用缓存像素合成标注，再写入原生剪贴板或文件；不把导出 PNG 返回前端后再次解码。旧的 Data URL 命令保留兼容，但编辑器不再使用。
 
 ## 6. 长截图限制与后续验证重点
 
@@ -85,8 +88,8 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
 ## 7. 新对话接手顺序
 
 1. 完整阅读本文件。
-2. 先确认工程路径：`C:\Users\Amamda\Documents\WPS Cloud Files\WPSDrive\218773289\WPS云盘\obsidian\my_tools\ScreenShot`。
-3. 当前目录不是 Git 仓库；如果以后初始化 Git，再运行 `git status --short`，不要覆盖用户已有改动。
+2. 当前 Mac 工程路径：`/Users/xylink/Documents/ChatGPT/tools/ScreenShot`；原 Windows 路径为 `C:\Users\Amamda\Documents\WPS Cloud Files\WPSDrive\218773289\WPS云盘\obsidian\my_tools\ScreenShot`。
+3. 当前工程是 Git 仓库。先运行 `git status --short`，不要覆盖用户已有改动。
 4. 运行 `npm install`，确保 `node_modules/.bin` 里的 Tauri CLI shim 存在。
 5. 运行 `npm run build`。
 6. 在 `src-tauri` 运行 `cargo test`。
@@ -96,6 +99,15 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
 ## 8. 当前状态
 
 - 已完成第一版可运行实现：主窗口、托盘、全局快捷键、冻结屏幕覆盖层、矩形框选、普通截图、手动滚动长截图后台拼接、标注预览、鼠标滚轮缩放、平移、箭头/矩形/画笔/文字/马赛克、撤销/重做、完成并复制 PNG、另存为。
+- 2026-10-13 响应速度优化：
+  - 本机原安装包为 Debug 构建，优化安装包改用 Release 构建，已更新 `/Applications/ScreenShot.app` 并启动；旧包备份在工程父目录的 `ScreenShot-before-performance.app`。
+  - 框选 webview 预热与复用，重置画面、选区和处理状态，拒绝过期会话；补充取消后的首页按钮状态恢复与并发截图保护。
+  - macOS 覆盖层位置使用显示器逻辑坐标，尺寸由原图像素除以缩放比例，避免 Retina 尺寸与坐标混用。
+  - 冻结前游标稳定等待由 250ms 改为 60ms，前端取消额外固定 60ms 显示延迟，捕获后立即恢复游标再编码预览。
+  - 原始像素缓存供后台复制/保存直接使用，无标注时借用原图，标注时只复制一次；原图不受输出合成影响。
+  - PNG 直接编码原始像素，使用快速压缩和单一 Sub 过滤，保持像素与透明度无损。
+  - `examples/latency.rs` 可复现不访问屏幕或剪贴板的图像处理基准：2560×1440 合成图，旧 Debug 预览约 1551ms / PNG 约 2757ms，新 Release 约 98ms / 56ms；旧 Release 复制 PNG 往返约 151ms，新路径矩形标注合成约 3ms。不是完整快捷键、窗口或系统剪贴板耗时。
+  - Rust 10 项测试与前端生产构建通过；Chromium/WebKit 模拟 IPC 回归覆盖文字输出、重复框选、2 倍像素比例、取消与过期响应。原生端到端延迟和 Windows 实机仍需验证。
 - 2026-10-13 文字标注：
   - 新增“文字”工具，点击原图位置输入中文、多行文字，支持颜色与 12–96px 字号调整。
   - 点击“添加文字”、切换工具或输出时确认当前输入；Esc/取消放弃，空白文字不产生标注。
@@ -129,7 +141,7 @@ ScreenShot 是一个 Windows + macOS 独立桌面工具，用于截取任意应�
 - Windows 产物：
   - Release 可执行文件：`src-tauri\target\release\screenshot-desktop.exe`
   - NSIS 安装包：`src-tauri\target\release\bundle\nsis\ScreenShot_0.1.0_x64-setup.exe`
-- macOS 代码路径已按跨平台思路实现，但尚未在真实 Mac 上验证权限、Retina、多屏和打包。
+- macOS x64 应用已在本机打包安装；屏幕录制权限、原生 Retina/多屏完整交互仍需实机验证。
 
 ## 9. 已知限制与注意事项
 

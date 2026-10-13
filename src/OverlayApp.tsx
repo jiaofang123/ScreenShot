@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { CaptureRegion, OverlaySnapshot, Point } from "./types";
 
 interface Selection {
@@ -28,6 +29,7 @@ function OverlayApp() {
   const [dragging, setDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [instruction, setInstruction] = useState<string | null>(null);
+  const revealedSession = useRef<number | null>(null);
 
   const selection = useMemo(
     () => (start && end ? normalizeSelection(start, end) : null),
@@ -35,25 +37,53 @@ function OverlayApp() {
   );
 
   useEffect(() => {
-    invoke<OverlaySnapshot>("get_overlay_snapshot", { monitorId })
-      .then(setSnapshot)
-      .catch(async (error) => {
-        console.error(error);
-        await invoke("cancel_capture");
-      });
+    let active = true;
+    let request = 0;
+    const reset = () => {
+      request += 1;
+      revealedSession.current = null;
+      setSnapshot(null);
+      setStart(null);
+      setEnd(null);
+      setDragging(false);
+      setProcessing(false);
+      setInstruction(null);
+    };
+    const refresh = async (quiet = false) => {
+      reset();
+      const current = request;
+      try {
+        const next = await invoke<OverlaySnapshot>("get_overlay_snapshot", { monitorId });
+        if (active && current === request) setSnapshot(next);
+      } catch (error) {
+        // Prewarmed windows intentionally have no screenshot until capture starts.
+        if (active && current === request && !quiet) setInstruction(String(error));
+      }
+    };
+    const unlisteners = Promise.all([
+      listen("overlay-reset", reset),
+      listen("overlay-refresh", () => { void refresh(); }),
+    ]);
+    void unlisteners.then(() => { if (active) void refresh(true); });
+    return () => {
+      active = false;
+      request += 1;
+      void unlisteners.then((items) => items.forEach((unlisten) => unlisten()));
+    };
   }, [monitorId]);
 
-  async function revealOverlayWindow() {
-    await invoke("show_overlay_window", { monitorId });
+  async function revealOverlayWindow(sessionId: number) {
+    if (revealedSession.current === sessionId) return;
+    revealedSession.current = sessionId;
+    try {
+      await invoke("show_overlay_window", { monitorId, sessionId });
+    } catch (error) {
+      if (revealedSession.current === sessionId) {
+        revealedSession.current = null;
+        setInstruction(String(error));
+      }
+    }
   }
-
-  useEffect(() => {
-    if (!snapshot) return;
-    const timer = window.setTimeout(() => {
-      void revealOverlayWindow();
-    }, 60);
-    return () => window.clearTimeout(timer);
-  }, [snapshot]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -104,6 +134,7 @@ function OverlayApp() {
     const x = Math.max(0, Math.round(selection.x * scaleX));
     const y = Math.max(0, Math.round(selection.y * scaleY));
     return {
+      sessionId: snapshot.sessionId,
       monitorId,
       x,
       y,
@@ -125,8 +156,10 @@ function OverlayApp() {
         await invoke("finish_region_capture", { region });
       }
     } catch (error) {
-      setProcessing(false);
-      setInstruction(String(error));
+      if (revealedSession.current === region.sessionId) {
+        setProcessing(false);
+        setInstruction(String(error));
+      }
     }
   }
 
@@ -155,10 +188,11 @@ function OverlayApp() {
       }}
     >
       <img
+        key={snapshot.sessionId}
         src={snapshot.dataUrl}
         draggable={false}
         onLoad={async () => {
-          await revealOverlayWindow();
+          await revealOverlayWindow(snapshot.sessionId);
         }}
         alt="Frozen screen"
       />

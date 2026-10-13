@@ -17,6 +17,7 @@ function App() {
       .catch(() => undefined);
 
     const unlisteners = Promise.all([
+      listen("capture-cancelled", () => setBusy(false)),
       listen<CapturePayload>("capture-ready", ({ payload }) => {
         setCapture(payload);
         setBusy(false);
@@ -60,7 +61,10 @@ function App() {
       <>
         <AnnotationEditor
           capture={capture}
-          onClose={() => setCapture(null)}
+          onClose={() => {
+            void invoke("release_capture", { captureId: capture.captureId }).catch(() => undefined);
+            setCapture(null);
+          }}
           onNotify={setMessage}
         />
         {message && <div className="status-toast">{message}</div>}

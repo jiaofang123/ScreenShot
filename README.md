@@ -23,6 +23,22 @@
 
 输入框中的空格、换行和 `Ctrl/Cmd + Z` 保留正常的文字编辑行为。确认后的文字可与其他标注一起撤销/重做；文字超出截图边缘的部分会被裁切。
 
+## 响应速度
+
+- 启动时预先创建隐藏的框选窗口，后续截图复用窗口；取消或完成时清空画面和框选状态。
+- Rust 缓存当前截图的原始像素。复制和保存只传递截图编号及标注，直接在后台合成并输出，避免整张图片反复进行 Base64 传输和 PNG 编解码。
+- PNG 使用快速无损编码，导出的原始像素和透明度不变。减少冻结前的固定等待，在图片加载后立即显示覆盖层。
+- 安装使用 Release 构建。Debug 构建的图像处理明显更慢，适合开发调试。
+
+本机 2560×1440 合成图的单次处理基准：预览由旧 Debug 版约 1551ms 降至 Release 版约 98ms；截图 PNG 由约 2757ms 降至约 56ms。新复制路径不再进行整图 PNG 往返，带矩形标注的合成约 3ms。这些数值不包含屏幕捕获、窗口显示和系统剪贴板耗时，完整操作耗时取决于显示器及系统环境。
+
+复现图像处理基准（不访问屏幕或剪贴板）：
+
+```sh
+cd src-tauri
+cargo run --release --example latency
+```
+
 ## 开发
 
 ```powershell
@@ -56,5 +72,13 @@ npm run tauri build -- --bundles nsis
 - `src-tauri\target\release\bundle\nsis\ScreenShot_0.1.0_x64-setup.exe`
 
 说明：当前工程路径包含中文和 WPS 云盘目录，WiX MSI 打包可能报 `LGHT0001 / 0x8007007B`；NSIS 安装包已验证可生成。
+
+## macOS 打包
+
+```sh
+npm run tauri build -- --bundles app
+```
+
+生成 `src-tauri/target/release/bundle/macos/ScreenShot.app`。复制到 `/Applications` 后启动；首次使用需授予屏幕录制权限。
 
 完整项目背景、架构与接手顺序见 [PROJECT_CONTEXT.md](./PROJECT_CONTEXT.md)。

@@ -79,7 +79,7 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
     setSpacePressed(false);
     setProcessing(false);
     setInitialized(false);
-  }, [capture.dataUrl]);
+  }, [capture.captureId]);
 
   useEffect(() => {
     if (textDraft) textInputRef.current?.focus();
@@ -357,8 +357,8 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
     setTextDraft((current) => current ? { ...current, fontSize: nextSize } : null);
   }
 
-  async function renderCurrent(current: Annotation[]) {
-    const renderAnnotations = current.map((annotation) => {
+  function serializeAnnotations(current: Annotation[]) {
+    return current.map((annotation) => {
       if (annotation.type === "text") {
         return { type: "text", x: annotation.x, y: annotation.y, data_url: annotation.dataUrl };
       }
@@ -377,11 +377,6 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
       const { blockSize, ...rest } = annotation;
       return { ...rest, block_size: blockSize };
     });
-
-    return invoke<string>("render_annotations", {
-      sourceDataUrl: capture.dataUrl,
-      annotations: renderAnnotations,
-    });
   }
 
   async function completeAndCopy() {
@@ -389,8 +384,10 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
     setProcessing(true);
     onNotify("正在渲染并复制图片…");
     try {
-      const output = await renderCurrent(commitText());
-      await invoke("copy_png_to_clipboard", { dataUrl: output });
+      await invoke("copy_capture_to_clipboard", {
+        captureId: capture.captureId,
+        annotations: serializeAnnotations(commitText()),
+      });
       onNotify("图片已复制到剪贴板，可以直接粘贴");
     } catch (error) {
       onNotify(`复制失败：${String(error)}`);
@@ -412,8 +409,11 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
         return;
       }
       onNotify("正在渲染并保存图片…");
-      const output = await renderCurrent(current);
-      await invoke("save_png", { path, dataUrl: output });
+      await invoke("save_capture", {
+        captureId: capture.captureId,
+        path,
+        annotations: serializeAnnotations(current),
+      });
       onNotify("PNG 已保存");
     } catch (error) {
       onNotify(`保存失败：${String(error)}`);

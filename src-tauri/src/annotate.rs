@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 use serde::Deserialize;
+use std::borrow::Cow;
 
 use crate::image_utils::{data_url_to_image, image_to_data_url};
 
@@ -66,11 +67,23 @@ pub fn render_annotations(
     source_data_url: String,
     annotations: Vec<Annotation>,
 ) -> Result<String, String> {
-    let mut image = data_url_to_image(&source_data_url)?;
+    let image = data_url_to_image(&source_data_url)?;
+    let rendered = render_image(&image, annotations)?;
+    image_to_data_url(&rendered)
+}
+
+pub fn render_image(
+    image: &RgbaImage,
+    annotations: Vec<Annotation>,
+) -> Result<Cow<'_, RgbaImage>, String> {
+    if annotations.is_empty() {
+        return Ok(Cow::Borrowed(image));
+    }
+    let mut image = image.clone();
     for annotation in annotations {
         apply_annotation(&mut image, annotation)?;
     }
-    image_to_data_url(&image)
+    Ok(Cow::Owned(image))
 }
 
 fn apply_annotation(image: &mut RgbaImage, annotation: Annotation) -> Result<(), String> {
@@ -293,6 +306,19 @@ fn parse_color(value: &str) -> Rgba<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unannotated_copy_borrows_pixels_and_annotations_preserve_source() {
+        let source = RgbaImage::from_pixel(6, 6, Rgba([255, 255, 255, 255]));
+        assert!(matches!(
+            render_image(&source, vec![]).unwrap(),
+            Cow::Borrowed(_)
+        ));
+        let rendered = render_image(&source, vec![text_annotation(1.0, 1.0)]).unwrap();
+        assert!(matches!(rendered, Cow::Owned(_)));
+        assert_eq!(*rendered.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(*source.get_pixel(1, 1), Rgba([255, 255, 255, 255]));
+    }
 
     fn text_annotation(x: f32, y: f32) -> Annotation {
         let mut text = RgbaImage::new(3, 3);

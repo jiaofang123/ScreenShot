@@ -1,6 +1,7 @@
 export type CaptureKind = "normal" | "long";
 
 export interface CapturePayload {
+  captureId: number;
   dataUrl: string;
   width: number;
   height: number;
@@ -8,6 +9,7 @@ export interface CapturePayload {
 }
 
 export interface OverlaySnapshot {
+  sessionId: number;
   monitorId: number;
   name: string;
   width: number;
@@ -17,6 +19,7 @@ export interface OverlaySnapshot {
 }
 
 export interface CaptureRegion {
+  sessionId: number;
   monitorId: number;
   x: number;
   y: number;

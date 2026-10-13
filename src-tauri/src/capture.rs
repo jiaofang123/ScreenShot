@@ -2,33 +2,38 @@ use std::{
     collections::HashMap,
     ffi::c_void,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use image::{imageops, RgbaImage};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tauri::{
-    async_runtime, AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size,
-    State, WebviewUrl, WebviewWindowBuilder,
+    async_runtime, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition,
+    PhysicalSize, Position, Size, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 use xcap::Monitor;
 
 use crate::{
+    capture_cache::CaptureCache,
     image_utils::{image_to_data_url, image_to_preview_data_url},
     stitch::{ScrollStitcher, StitchOutcome},
 };
 
-const CURSOR_HIDE_SETTLE: Duration = Duration::from_millis(250);
+const CURSOR_HIDE_SETTLE: Duration = Duration::from_millis(60);
 
 #[derive(Default)]
 pub struct AppState {
+    pub images: CaptureCache,
     snapshots: Mutex<HashMap<u32, MonitorSnapshot>>,
     long_capture_cancel: Mutex<Option<Arc<AtomicBool>>>,
+    capture_in_progress: AtomicBool,
+    overlay_session: AtomicU64,
+    overlay_setup: Mutex<()>,
 }
 
 struct CursorHideGuard {
@@ -76,6 +81,7 @@ impl Drop for CursorPositionGuard {
 }
 
 struct MonitorSnapshot {
+    session_id: u64,
     id: u32,
     name: String,
     x: i32,
@@ -90,6 +96,7 @@ struct MonitorSnapshot {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySnapshot {
+    session_id: u64,
     monitor_id: u32,
     name: String,
     width: u32,
@@ -101,6 +108,7 @@ pub struct OverlaySnapshot {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CapturePayload {
+    capture_id: u64,
     data_url: String,
     width: u32,
     height: u32,
@@ -118,6 +126,7 @@ struct LongCaptureStatus {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CaptureRegion {
+    session_id: u64,
     monitor_id: u32,
     x: u32,
     y: u32,
@@ -149,22 +158,55 @@ pub async fn begin_capture(app: AppHandle) -> Result<(), String> {
 }
 
 pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
-    if app.state::<AppState>().long_capture_cancel.lock().is_some() {
+    let state = app.state::<AppState>();
+    if state.long_capture_cancel.lock().is_some() {
         return Err("长截图正在进行，请先按快捷键停止".to_string());
     }
 
     ensure_screen_capture_permission(&app)?;
+    if state
+        .capture_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Ok(()); // Repeated shortcuts must not show the main window during a freeze.
+    }
+    let result = begin_capture_session(app.clone()).await;
+    state.capture_in_progress.store(false, Ordering::Release);
+    if result.is_err() {
+        state.snapshots.lock().clear();
+        hide_overlay_windows(&app);
+        show_main_window(&app);
+    }
+    result
+}
 
-    close_overlay_windows(&app);
+async fn begin_capture_session(app: AppHandle) -> Result<(), String> {
+    let started = Instant::now();
+    let session_id = app
+        .state::<AppState>()
+        .overlay_session
+        .fetch_add(1, Ordering::AcqRel)
+        + 1;
+    app.state::<AppState>().snapshots.lock().clear();
+    hide_overlay_windows(&app);
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.hide();
     }
 
-    let snapshots = async_runtime::spawn_blocking(capture_all_monitors)
+    let snapshots = async_runtime::spawn_blocking(move || capture_all_monitors(session_id))
         .await
         .map_err(|error| format!("截图任务异常：{error}"))??;
+    if app
+        .state::<AppState>()
+        .overlay_session
+        .load(Ordering::Acquire)
+        != session_id
+    {
+        return Ok(()); // A cancelled freeze must not reopen its windows later.
+    }
 
-    let window_specs: Vec<(u32, i32, i32, u32, u32)> = snapshots
+    let window_specs: Vec<(u32, i32, i32, u32, u32, f32)> = snapshots
         .values()
         .map(|snapshot| {
             (
@@ -173,22 +215,77 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
                 snapshot.y,
                 snapshot.width,
                 snapshot.height,
+                snapshot.scale_factor,
             )
         })
         .collect();
     *app.state::<AppState>().snapshots.lock() = snapshots;
 
-    let eager_show_overlay = should_eager_show_overlay();
-    let mut focused_overlay = false;
+    let overlay_app = app.clone();
+    async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut focused = false;
+        for (id, x, y, width, height, scale_factor) in window_specs {
+            if overlay_app
+                .state::<AppState>()
+                .overlay_session
+                .load(Ordering::Acquire)
+                != session_id
+            {
+                return Ok(());
+            }
+            let window =
+                ensure_overlay_window(&overlay_app, id, x, y, width, height, scale_factor)?;
+            if overlay_app
+                .state::<AppState>()
+                .overlay_session
+                .load(Ordering::Acquire)
+                != session_id
+            {
+                return Ok(());
+            }
+            window
+                .emit("overlay-refresh", ())
+                .map_err(|error| error.to_string())?;
+            if should_eager_show_overlay() {
+                window.show().map_err(|error| error.to_string())?;
+                if !focused {
+                    window.set_focus().map_err(|error| error.to_string())?;
+                    focused = true;
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("框选窗口任务异常：{error}"))??;
+    eprintln!(
+        "ScreenShot freeze prepared: {:.0} ms",
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    Ok(())
+}
 
-    for (id, x, y, width, height) in window_specs {
-        let label = format!("overlay-{id}");
+fn ensure_overlay_window(
+    app: &AppHandle,
+    id: u32,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    scale: f32,
+) -> Result<WebviewWindow, String> {
+    let state = app.state::<AppState>();
+    let _setup = state.overlay_setup.lock();
+    let label = format!("overlay-{id}");
+    let window = if let Some(window) = app.get_webview_window(&label) {
+        window
+    } else {
         let url = WebviewUrl::App(
             format!("index.html?mode=overlay&monitorId={id}")
                 .parse()
                 .map_err(|error| format!("无法创建框选页面地址：{error}"))?,
         );
-        let mut builder = WebviewWindowBuilder::new(&app, &label, url)
+        let mut builder = WebviewWindowBuilder::new(app, &label, url)
             .title("ScreenShot Capture")
             .decorations(false)
             .resizable(false)
@@ -198,28 +295,68 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
         if cfg!(target_os = "macos") {
             builder = builder.visible_on_all_workspaces(true);
         }
-        let window = builder
+        builder
             .build()
-            .map_err(|error| format!("无法创建框选窗口：{error}"))?;
-        window
-            .set_position(Position::Physical(PhysicalPosition::new(x, y)))
-            .map_err(|error| format!("无法定位框选窗口：{error}"))?;
-        window
-            .set_size(Size::Physical(PhysicalSize::new(width, height)))
-            .map_err(|error| format!("无法调整框选窗口：{error}"))?;
-        if eager_show_overlay {
-            window
-                .show()
-                .map_err(|error| format!("无法显示框选窗口：{error}"))?;
-            if !focused_overlay {
-                window
-                    .set_focus()
-                    .map_err(|error| format!("无法聚焦框选窗口：{error}"))?;
-                focused_overlay = true;
+            .map_err(|error| format!("无法创建框选窗口：{error}"))?
+    };
+    let (position, size) = if cfg!(target_os = "macos") {
+        // xcap's macOS origins are logical points; capture pixels may be Retina-sized.
+        (
+            Position::Logical(LogicalPosition::new(x as f64, y as f64)),
+            Size::Logical(LogicalSize::new(
+                width as f64 / scale.max(1.0) as f64,
+                height as f64 / scale.max(1.0) as f64,
+            )),
+        )
+    } else {
+        (
+            Position::Physical(PhysicalPosition::new(x, y)),
+            Size::Physical(PhysicalSize::new(width, height)),
+        )
+    };
+    window
+        .set_position(position)
+        .map_err(|error| format!("无法定位框选窗口：{error}"))?;
+    window
+        .set_size(size)
+        .map_err(|error| format!("无法调整框选窗口：{error}"))?;
+    Ok(window)
+}
+
+pub fn prewarm_overlay_windows(app: AppHandle) {
+    async_runtime::spawn_blocking(move || {
+        let Ok(monitors) = Monitor::all() else {
+            return;
+        };
+        for monitor in monitors {
+            let spec = (
+                monitor.id(),
+                monitor.x(),
+                monitor.y(),
+                monitor.width(),
+                monitor.height(),
+            );
+            if let (Ok(id), Ok(x), Ok(y), Ok(width), Ok(height)) = spec {
+                let scale = monitor.scale_factor().unwrap_or(1.0).max(1.0);
+                let pixel_scale = if cfg!(target_os = "macos") {
+                    scale
+                } else {
+                    1.0
+                };
+                if let Err(error) = ensure_overlay_window(
+                    &app,
+                    id,
+                    x,
+                    y,
+                    (width as f32 * pixel_scale).round() as u32,
+                    (height as f32 * pixel_scale).round() as u32,
+                    scale,
+                ) {
+                    eprintln!("ScreenShot overlay prewarm: {error}");
+                }
             }
         }
-    }
-    Ok(())
+    });
 }
 
 #[tauri::command]
@@ -232,6 +369,7 @@ pub fn get_overlay_snapshot(
         .get(&monitor_id)
         .ok_or_else(|| "截图会话已失效，请重新截图".to_string())?;
     Ok(OverlaySnapshot {
+        session_id: snapshot.session_id,
         monitor_id: snapshot.id,
         name: snapshot.name.clone(),
         width: snapshot.width,
@@ -242,7 +380,13 @@ pub fn get_overlay_snapshot(
 }
 
 #[tauri::command]
-pub fn show_overlay_window(app: AppHandle, monitor_id: u32) -> Result<(), String> {
+pub fn show_overlay_window(app: AppHandle, monitor_id: u32, session_id: u64) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state.overlay_session.load(Ordering::Acquire) != session_id
+        || !state.snapshots.lock().contains_key(&monitor_id)
+    {
+        return Ok(()); // Ignore image-load acknowledgements from an older or cancelled capture.
+    }
     let label = format!("overlay-{monitor_id}");
     let window = app
         .get_webview_window(&label)
@@ -261,16 +405,39 @@ fn should_eager_show_overlay() -> bool {
 }
 
 #[tauri::command]
-pub fn finish_region_capture(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    region: CaptureRegion,
-) -> Result<(), String> {
-    let image = crop_snapshot(&state, &region)?;
-    state.snapshots.lock().clear();
-    deliver_image(&app, image, "normal")?;
-    close_overlay_windows(&app);
-    Ok(())
+pub async fn finish_region_capture(app: AppHandle, region: CaptureRegion) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    if state
+        .capture_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("正在准备截图，请稍候".to_string());
+    }
+    let worker_app = app.clone();
+    let result = async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let app = worker_app;
+        let state = app.state::<AppState>();
+        let image = crop_snapshot(&state, &region)?;
+        state.snapshots.lock().clear();
+        hide_overlay_windows(&app);
+        deliver_image(&app, image, "normal")?;
+        eprintln!(
+            "ScreenShot selection to editor: {:.0} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("区域截图任务异常：{error}"));
+    state.capture_in_progress.store(false, Ordering::Release);
+    let result = result.and_then(|result| result);
+    if let Err(error) = &result {
+        hide_overlay_windows(&app);
+        report_error(&app, error.clone());
+    }
+    result
 }
 
 #[tauri::command]
@@ -285,7 +452,7 @@ pub fn start_long_capture(
 
     let first_frame = crop_snapshot(&state, &region)?;
     state.snapshots.lock().clear();
-    close_overlay_windows(&app);
+    hide_overlay_windows(&app);
 
     let cancel = Arc::new(AtomicBool::new(false));
     *state.long_capture_cancel.lock() = Some(cancel.clone());
@@ -319,9 +486,11 @@ pub fn is_long_capture_active(state: State<'_, AppState>) -> bool {
 
 #[tauri::command]
 pub fn cancel_capture(app: AppHandle, state: State<'_, AppState>) {
+    state.overlay_session.fetch_add(1, Ordering::AcqRel);
     state.snapshots.lock().clear();
-    close_overlay_windows(&app);
+    hide_overlay_windows(&app);
     show_main_window(&app);
+    let _ = app.emit_to("main", "capture-cancelled", ());
 }
 
 fn run_long_capture(
@@ -423,24 +592,22 @@ fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<Rgba
         .map_err(|error| format!("无法捕获屏幕区域：{error}"))
 }
 
-fn capture_all_monitors() -> Result<HashMap<u32, MonitorSnapshot>, String> {
+fn capture_all_monitors(session_id: u64) -> Result<HashMap<u32, MonitorSnapshot>, String> {
     let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
-    let _cursor_guard = hide_cursor_for_monitors(&monitors);
-    let _cursor_position_guard = move_cursor_to_safe_edge(&monitors);
+    let cursor_guard = hide_cursor_for_monitors(&monitors);
+    let cursor_position_guard = move_cursor_to_safe_edge(&monitors);
     wait_for_cursor_hide();
     let mut snapshots = HashMap::new();
     for monitor in monitors {
         let id = monitor.id().map_err(|error| error.to_string())?;
         let image = monitor
             .capture_image()
-            .map_err(|error| {
-                screen_capture_error(format!("无法捕获显示器 {id}：{error}"))
-            })?;
+            .map_err(|error| screen_capture_error(format!("无法捕获显示器 {id}：{error}")))?;
         let scale_factor = monitor.scale_factor().unwrap_or(1.0);
-        let preview_data_url = image_to_preview_data_url(&image, scale_factor)?;
         snapshots.insert(
             id,
             MonitorSnapshot {
+                session_id,
                 id,
                 name: monitor
                     .friendly_name()
@@ -451,10 +618,16 @@ fn capture_all_monitors() -> Result<HashMap<u32, MonitorSnapshot>, String> {
                 width: image.width(),
                 height: image.height(),
                 scale_factor,
-                preview_data_url,
+                preview_data_url: String::new(),
                 image,
             },
         );
+    }
+    drop(cursor_position_guard);
+    drop(cursor_guard);
+    for snapshot in snapshots.values_mut() {
+        snapshot.preview_data_url =
+            image_to_preview_data_url(&snapshot.image, snapshot.scale_factor)?;
     }
     if snapshots.is_empty() {
         Err("未找到可截图的显示器".to_string())
@@ -471,6 +644,9 @@ fn crop_snapshot(state: &AppState, region: &CaptureRegion) -> Result<RgbaImage, 
     let snapshot = snapshots
         .get(&region.monitor_id)
         .ok_or_else(|| "截图会话已失效，请重新截图".to_string())?;
+    if snapshot.session_id != region.session_id {
+        return Err("截图会话已失效，请重新截图".to_string());
+    }
     let right = region.x.saturating_add(region.width);
     let bottom = region.y.saturating_add(region.height);
     if right > snapshot.width || bottom > snapshot.height {
@@ -583,10 +759,15 @@ fn wait_for_cursor_hide() {
 }
 
 fn deliver_image(app: &AppHandle, image: RgbaImage, capture_kind: &str) -> Result<(), String> {
+    let width = image.width();
+    let height = image.height();
+    let data_url = image_to_data_url(&image)?;
+    let capture_id = app.state::<AppState>().images.store(image);
     let payload = CapturePayload {
-        width: image.width(),
-        height: image.height(),
-        data_url: image_to_data_url(&image)?,
+        capture_id,
+        width,
+        height,
+        data_url,
         capture_kind: capture_kind.to_string(),
     };
     show_main_window(app);
@@ -660,10 +841,11 @@ fn screen_capture_error(message: String) -> String {
     message
 }
 
-fn close_overlay_windows(app: &AppHandle) {
+fn hide_overlay_windows(app: &AppHandle) {
     for (label, window) in app.webview_windows() {
         if label.starts_with("overlay-") {
-            let _ = window.close();
+            let _ = window.hide();
+            let _ = window.emit("overlay-reset", ());
         }
     }
 }
@@ -687,4 +869,47 @@ fn emit_long_status(app: &AppHandle, status: &str, total_height: u32, message: &
 pub fn report_error(app: &AppHandle, message: String) {
     show_main_window(app);
     let _ = app.emit_to("main", "app-error", message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crops_original_pixels_and_rejects_stale_overlay_sessions() {
+        let state = AppState::default();
+        let image = RgbaImage::from_fn(12, 10, |x, y| image::Rgba([x as u8, y as u8, 42, 255]));
+        state.snapshots.lock().insert(
+            1,
+            MonitorSnapshot {
+                session_id: 7,
+                id: 1,
+                name: "Test".into(),
+                x: -100,
+                y: 0,
+                width: 12,
+                height: 10,
+                scale_factor: 2.0,
+                preview_data_url: String::new(),
+                image,
+            },
+        );
+        let mut region = CaptureRegion {
+            session_id: 7,
+            monitor_id: 1,
+            x: 3,
+            y: 4,
+            width: 5,
+            height: 3,
+        };
+        let cropped = crop_snapshot(&state, &region).unwrap();
+        assert_eq!(cropped.dimensions(), (5, 3));
+        assert_eq!(*cropped.get_pixel(0, 0), image::Rgba([3, 4, 42, 255]));
+        assert_eq!(*cropped.get_pixel(4, 2), image::Rgba([7, 6, 42, 255]));
+        region.session_id = 6;
+        assert!(crop_snapshot(&state, &region).is_err());
+        region.session_id = 7;
+        region.x = u32::MAX;
+        assert!(crop_snapshot(&state, &region).is_err());
+    }
 }
