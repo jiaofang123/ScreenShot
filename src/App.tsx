@@ -86,7 +86,7 @@ function App() {
           <span className="eyebrow">READY WHEN YOU ARE</span>
           <h2>框住重点，剩下的交给它。</h2>
           <p>
-            支持普通框选和手动滚动长截图。完成后可以画箭头、圈重点、打马赛克，随后自动复制到剪贴板。
+            支持普通框选和手动滚动长截图。完成后可以画箭头、圈重点、添加文字、打马赛克，随后自动复制到剪贴板。
           </p>
           <button className="capture-button" onClick={startCapture} disabled={busy}>
             <span className="capture-icon" aria-hidden="true" />
@@ -133,7 +133,7 @@ function App() {
         <article>
           <div className="feature-icon">↗</div>
           <h3>快速标注</h3>
-          <p>箭头、矩形、画笔和马赛克，完成即复制。</p>
+          <p>箭头、矩形、画笔、文字和马赛克，完成即复制。</p>
         </article>
       </section>
 

@@ -21,7 +21,8 @@ body,
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -30,7 +31,8 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
   outline: 2px solid #72e0ba;
   outline-offset: 2px;
 }
@@ -530,7 +532,7 @@ kbd {
 
 .editor-shell {
   display: grid;
-  grid-template: minmax(62px, auto) 1fr / 74px 1fr;
+  grid-template: minmax(62px, auto) minmax(0, 1fr) / 74px minmax(0, 1fr);
   width: 100%;
   height: 100%;
   background: #080b10;
@@ -714,6 +716,7 @@ kbd {
 .image-viewport.tool-rect,
 .image-viewport.tool-pen,
 .image-viewport.tool-mosaic { cursor: crosshair; }
+.image-viewport.tool-text { cursor: text; }
 
 .image-stage {
   position: absolute;
@@ -741,9 +744,49 @@ kbd {
 }
 
 .annotation-layer {
-  overflow: visible;
+  overflow: hidden;
   pointer-events: none;
 }
+
+.text-entry {
+  position: absolute;
+  z-index: 2;
+  margin: 0;
+  padding: 2px;
+  border: 0;
+  border-radius: 2px;
+  outline: 1px solid #72e0ba;
+  outline-offset: 0;
+  background: rgba(255, 255, 255, 0.92);
+  resize: none;
+  cursor: text;
+  touch-action: auto;
+  tab-size: 4;
+}
+
+.text-entry::placeholder { color: #737d89; }
+.text-entry:focus-visible { outline: 1px solid #72e0ba; outline-offset: 0; }
+
+.text-entry-actions {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 20px);
+  padding: 8px;
+  border: 1px solid #2c5549;
+  border-radius: 10px;
+  background: #111d1a;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  transform: translateX(-50%);
+  cursor: default;
+}
+
+.text-entry-actions span { color: #a5b6af; font-size: 10px; white-space: nowrap; }
+.text-entry-actions button { flex-shrink: 0; }
 
 .viewport-help {
   position: absolute;
