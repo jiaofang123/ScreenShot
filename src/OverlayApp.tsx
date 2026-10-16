@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { CaptureRegion, OverlaySnapshot, Point } from "./types";
@@ -9,6 +9,8 @@ interface Selection {
   width: number;
   height: number;
 }
+
+type CaptureAction = "copy" | "edit" | "long";
 
 function normalizeSelection(start: Point, end: Point): Selection {
   return {
@@ -27,14 +29,29 @@ function OverlayApp() {
   const [start, setStart] = useState<Point | null>(null);
   const [end, setEnd] = useState<Point | null>(null);
   const [dragging, setDragging] = useState(false);
-  const [processing, setProcessing] = useState(false);
+  const [operation, setOperation] = useState<CaptureAction | null>(null);
   const [instruction, setInstruction] = useState<string | null>(null);
   const revealedSession = useRef<number | null>(null);
+  const processingSession = useRef<number | null>(null);
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarSize, setToolbarSize] = useState({ width: 360, height: 48 });
+  const processing = operation !== null;
 
   const selection = useMemo(
     () => (start && end ? normalizeSelection(start, end) : null),
     [start, end],
   );
+  const showToolbar = !!selection && selection.width >= 8 && selection.height >= 8 && !dragging;
+
+  useLayoutEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+    const measure = () => setToolbarSize({ width: toolbar.offsetWidth, height: toolbar.offsetHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, [showToolbar]);
 
   useEffect(() => {
     let active = true;
@@ -42,11 +59,12 @@ function OverlayApp() {
     const reset = () => {
       request += 1;
       revealedSession.current = null;
+      processingSession.current = null;
       setSnapshot(null);
       setStart(null);
       setEnd(null);
       setDragging(false);
-      setProcessing(false);
+      setOperation(null);
       setInstruction(null);
     };
     const refresh = async (quiet = false) => {
@@ -87,11 +105,14 @@ function OverlayApp() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat || event.isComposing || processingSession.current !== null) return;
       if (event.key === "Escape") {
-        invoke("cancel_capture");
+        void invoke("cancel_capture");
       }
-      if (event.key === "Enter" && selection && selection.width >= 8) {
-        void finish("normal");
+      if (event.key === "Enter" && showToolbar &&
+        !(event.target instanceof Element && event.target.closest("button"))) {
+        event.preventDefault();
+        void finish("copy");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -106,7 +127,7 @@ function OverlayApp() {
   }
 
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (processing || event.button !== 0) return;
+    if (processingSession.current !== null || event.button !== 0) return;
     const point = pointerPosition(event);
     setStart(point);
     setEnd(point);
@@ -143,22 +164,26 @@ function OverlayApp() {
     };
   }
 
-  async function finish(kind: "normal" | "long") {
+  async function finish(kind: CaptureAction) {
     const region = toPhysicalRegion();
-    if (!region || processing) return;
-    setProcessing(true);
+    if (!region || processingSession.current !== null) return;
+    processingSession.current = region.sessionId;
+    setOperation(kind);
+    setInstruction(null);
     try {
       if (kind === "long") {
         setInstruction("准备好了：窗口消失后缓慢向下滚动，再按相同快捷键停止");
         await new Promise((resolve) => window.setTimeout(resolve, 900));
+        if (processingSession.current !== region.sessionId) return;
         await invoke("start_long_capture", { region });
       } else {
-        await invoke("finish_region_capture", { region });
+        await invoke(kind === "copy" ? "copy_region_to_clipboard" : "finish_region_capture", { region });
       }
     } catch (error) {
-      if (revealedSession.current === region.sessionId) {
-        setProcessing(false);
-        setInstruction(String(error));
+      if (processingSession.current === region.sessionId) {
+        processingSession.current = null;
+        setOperation(null);
+        setInstruction(`${kind === "copy" ? "复制失败：" : ""}${String(error)}`);
       }
     }
   }
@@ -168,12 +193,13 @@ function OverlayApp() {
   }
 
   const toolbarLeft = selection
-    ? Math.max(12, Math.min(window.innerWidth - 330, selection.x))
+    ? Math.max(12, Math.min(window.innerWidth - toolbarSize.width - 12, selection.x))
     : 12;
   const toolbarTop = selection
-    ? selection.y + selection.height + 12 + 64 < window.innerHeight
-      ? selection.y + selection.height + 12
-      : Math.max(12, selection.y - 58)
+    ? Math.max(12, Math.min(window.innerHeight - toolbarSize.height - 12,
+        selection.y + selection.height + 12 + toolbarSize.height <= window.innerHeight - 12
+          ? selection.y + selection.height + 12
+          : selection.y - toolbarSize.height - 12))
     : 12;
 
   return (
@@ -184,7 +210,7 @@ function OverlayApp() {
       onPointerUp={onPointerUp}
       onContextMenu={(event) => {
         event.preventDefault();
-        invoke("cancel_capture");
+        if (processingSession.current === null) void invoke("cancel_capture");
       }}
     >
       <img
@@ -243,23 +269,29 @@ function OverlayApp() {
         <div className="shade full" />
       )}
 
-      {selection && selection.width >= 8 && selection.height >= 8 && !dragging && (
+      {showToolbar && (
         <div
+          ref={toolbarRef}
           className="capture-toolbar"
           style={{ left: toolbarLeft, top: toolbarTop }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <button disabled={processing} onClick={() => finish("normal")}>
-            框选截图
+          <button className="accent" disabled={processing} onClick={() => finish("copy")}
+            title="直接复制选区截图（Enter）">
+            {operation === "copy" ? "正在复制…" : "完成并复制"}
+          </button>
+          <button disabled={processing} onClick={() => finish("edit")}
+            title="打开编辑器添加文字、箭头等标注">
+            编辑截图
           </button>
           <button
-            className="accent"
             disabled={processing}
             onClick={() => finish("long")}
           >
             滚动长截图
           </button>
-          <button className="icon-only" onClick={() => invoke("cancel_capture")}>
+          <button className="icon-only" disabled={processing} aria-label="取消截图"
+            onClick={() => invoke("cancel_capture")}>
             Esc
           </button>
         </div>
@@ -267,7 +299,7 @@ function OverlayApp() {
 
       <div className="overlay-hint">
         <strong>{snapshot.name}</strong>
-        <span>拖动鼠标框选 · 右键或 Esc 取消</span>
+        <span>拖动框选 · Enter 复制 · 右键或 Esc 取消</span>
       </div>
       {instruction && <div className="overlay-instruction">{instruction}</div>}
     </div>

@@ -468,6 +468,9 @@ kbd {
   position: absolute;
   z-index: 5;
   display: flex;
+  flex-wrap: wrap;
+  width: max-content;
+  max-width: calc(100vw - 24px);
   gap: 6px;
   padding: 6px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -498,6 +501,9 @@ kbd {
   top: 18px;
   z-index: 4;
   display: flex;
+  align-items: center;
+  width: max-content;
+  max-width: calc(100vw - 24px);
   gap: 10px;
   padding: 8px 12px;
   color: #9ba5b3;
@@ -509,7 +515,7 @@ kbd {
   pointer-events: none;
 }
 
-.overlay-hint strong { color: #e1e7ee; }
+.overlay-hint strong { color: #e1e7ee; flex-shrink: 0; }
 
 .overlay-instruction {
   position: fixed;

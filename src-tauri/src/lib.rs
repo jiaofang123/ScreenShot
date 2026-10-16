@@ -176,20 +176,14 @@ pub fn run() {
                         stop_long_capture_impl(app);
                     }
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        capture::show_main_window(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if matches!(event, TrayIconEvent::DoubleClick { .. }) {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        capture::show_main_window(tray.app_handle());
                     }
                 });
             if let Some(icon) = app.default_window_icon().cloned() {
@@ -205,6 +199,7 @@ pub fn run() {
             capture::get_overlay_snapshot,
             capture::show_overlay_window,
             capture::finish_region_capture,
+            capture::copy_region_to_clipboard,
             capture::start_long_capture,
             capture::stop_long_capture,
             capture::cancel_capture,

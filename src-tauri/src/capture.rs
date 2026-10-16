@@ -247,6 +247,8 @@ async fn begin_capture_session(app: AppHandle) -> Result<(), String> {
                 .emit("overlay-refresh", ())
                 .map_err(|error| error.to_string())?;
             if should_eager_show_overlay() {
+                #[cfg(target_os = "macos")]
+                overlay_app.show().map_err(|error| error.to_string())?;
                 window.show().map_err(|error| error.to_string())?;
                 if !focused {
                     window.set_focus().map_err(|error| error.to_string())?;
@@ -391,6 +393,8 @@ pub fn show_overlay_window(app: AppHandle, monitor_id: u32, session_id: u64) -> 
     let window = app
         .get_webview_window(&label)
         .ok_or_else(|| "框选窗口已关闭，请重新截图".to_string())?;
+    #[cfg(target_os = "macos")]
+    app.show().map_err(|error| error.to_string())?;
     window
         .show()
         .map_err(|error| format!("无法显示框选窗口：{error}"))?;
@@ -406,6 +410,37 @@ fn should_eager_show_overlay() -> bool {
 
 #[tauri::command]
 pub async fn finish_region_capture(app: AppHandle, region: CaptureRegion) -> Result<(), String> {
+    complete_region_capture(app, region, RegionDestination::Editor).await
+}
+
+#[tauri::command]
+pub async fn copy_region_to_clipboard(app: AppHandle, region: CaptureRegion) -> Result<(), String> {
+    complete_region_capture(app, region, RegionDestination::Clipboard).await
+}
+
+#[derive(Clone, Copy)]
+enum RegionDestination {
+    Editor,
+    Clipboard,
+}
+
+// Retain the original snapshot on clipboard errors so the user can retry or edit.
+fn copy_snapshot(
+    state: &AppState,
+    region: &CaptureRegion,
+    copy: impl FnOnce(&RgbaImage) -> Result<(), String>,
+) -> Result<(), String> {
+    let image = crop_snapshot(state, region)?;
+    copy(&image)?;
+    state.snapshots.lock().clear();
+    Ok(())
+}
+
+async fn complete_region_capture(
+    app: AppHandle,
+    region: CaptureRegion,
+    destination: RegionDestination,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     if state
         .capture_in_progress
@@ -419,12 +454,26 @@ pub async fn finish_region_capture(app: AppHandle, region: CaptureRegion) -> Res
         let started = Instant::now();
         let app = worker_app;
         let state = app.state::<AppState>();
-        let image = crop_snapshot(&state, &region)?;
-        state.snapshots.lock().clear();
-        hide_overlay_windows(&app);
-        deliver_image(&app, image, "normal")?;
+        match destination {
+            RegionDestination::Clipboard => {
+                copy_snapshot(&state, &region, crate::copy_image_to_clipboard)?;
+                hide_overlay_windows(&app);
+                // Ordering out the last NSWindow alone can leave ScreenShot active.
+                // Hide the application as well so the previous app can receive paste.
+                #[cfg(target_os = "macos")]
+                let _ = app.hide();
+                // Notify the hidden main window without opening the editor or encoding a PNG.
+                let _ = app.emit_to("main", "capture-copied", ());
+            }
+            RegionDestination::Editor => {
+                let image = crop_snapshot(&state, &region)?;
+                state.snapshots.lock().clear();
+                hide_overlay_windows(&app);
+                deliver_image(&app, image, "normal")?;
+            }
+        }
         eprintln!(
-            "ScreenShot selection to editor: {:.0} ms",
+            "ScreenShot selection completed: {:.0} ms",
             started.elapsed().as_secs_f64() * 1000.0
         );
         Ok(())
@@ -433,7 +482,7 @@ pub async fn finish_region_capture(app: AppHandle, region: CaptureRegion) -> Res
     .map_err(|error| format!("区域截图任务异常：{error}"));
     state.capture_in_progress.store(false, Ordering::Release);
     let result = result.and_then(|result| result);
-    if let Err(error) = &result {
+    if let (Err(error), RegionDestination::Editor) = (&result, destination) {
         hide_overlay_windows(&app);
         report_error(&app, error.clone());
     }
@@ -775,7 +824,9 @@ fn deliver_image(app: &AppHandle, image: RgbaImage, capture_kind: &str) -> Resul
         .map_err(|error| format!("无法打开标注预览：{error}"))
 }
 
-fn show_main_window(app: &AppHandle) {
+pub(crate) fn show_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.show();
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.unminimize();
@@ -875,8 +926,7 @@ pub fn report_error(app: &AppHandle, message: String) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn crops_original_pixels_and_rejects_stale_overlay_sessions() {
+    fn capture_fixture() -> (AppState, CaptureRegion) {
         let state = AppState::default();
         let image = RgbaImage::from_fn(12, 10, |x, y| image::Rgba([x as u8, y as u8, 42, 255]));
         state.snapshots.lock().insert(
@@ -894,7 +944,7 @@ mod tests {
                 image,
             },
         );
-        let mut region = CaptureRegion {
+        let region = CaptureRegion {
             session_id: 7,
             monitor_id: 1,
             x: 3,
@@ -902,6 +952,12 @@ mod tests {
             width: 5,
             height: 3,
         };
+        (state, region)
+    }
+
+    #[test]
+    fn crops_original_pixels_and_rejects_stale_overlay_sessions() {
+        let (state, mut region) = capture_fixture();
         let cropped = crop_snapshot(&state, &region).unwrap();
         assert_eq!(cropped.dimensions(), (5, 3));
         assert_eq!(*cropped.get_pixel(0, 0), image::Rgba([3, 4, 42, 255]));
@@ -911,5 +967,31 @@ mod tests {
         region.session_id = 7;
         region.x = u32::MAX;
         assert!(crop_snapshot(&state, &region).is_err());
+    }
+
+    #[test]
+    fn quick_copy_preserves_selection_on_failure_and_can_retry_original_pixels() {
+        let (state, region) = capture_fixture();
+        let error = copy_snapshot(&state, &region, |_| Err("剪贴板暂时不可用".into()));
+        assert_eq!(error.unwrap_err(), "剪贴板暂时不可用");
+        assert_eq!(state.snapshots.lock().len(), 1);
+
+        copy_snapshot(&state, &region, |image| {
+            assert_eq!(image.dimensions(), (5, 3));
+            assert_eq!(*image.get_pixel(0, 0), image::Rgba([3, 4, 42, 255]));
+            assert_eq!(*image.get_pixel(4, 2), image::Rgba([7, 6, 42, 255]));
+            Ok(())
+        })
+        .unwrap();
+        assert!(state.snapshots.lock().is_empty());
+        assert!(copy_snapshot(&state, &region, |_| panic!("不可重复复制已完成的选区")).is_err());
+    }
+
+    #[test]
+    fn stale_quick_copy_never_writes_the_clipboard_or_discards_the_current_session() {
+        let (state, mut region) = capture_fixture();
+        region.session_id -= 1;
+        assert!(copy_snapshot(&state, &region, |_| panic!("不可复制过期选区")).is_err());
+        assert_eq!(state.snapshots.lock().len(), 1);
     }
 }

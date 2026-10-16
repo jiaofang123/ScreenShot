@@ -18,6 +18,10 @@ function App() {
 
     const unlisteners = Promise.all([
       listen("capture-cancelled", () => setBusy(false)),
+      listen("capture-copied", () => {
+        setBusy(false);
+        setMessage("图片已复制到剪贴板，可以直接粘贴");
+      }),
       listen<CapturePayload>("capture-ready", ({ payload }) => {
         setCapture(payload);
         setBusy(false);
@@ -90,7 +94,7 @@ function App() {
           <span className="eyebrow">READY WHEN YOU ARE</span>
           <h2>框住重点，剩下的交给它。</h2>
           <p>
-            支持普通框选和手动滚动长截图。完成后可以画箭头、圈重点、添加文字、打马赛克，随后自动复制到剪贴板。
+            框选后可直接完成并复制；需要画箭头、圈重点、添加文字或打马赛克时，选择编辑截图。也支持手动滚动长截图。
           </p>
           <button className="capture-button" onClick={startCapture} disabled={busy}>
             <span className="capture-icon" aria-hidden="true" />
