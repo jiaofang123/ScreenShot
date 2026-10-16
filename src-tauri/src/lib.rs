@@ -1,9 +1,15 @@
 mod annotate;
 mod capture;
+mod capture_cache;
 mod image_utils;
 mod stitch;
 
-use std::{borrow::Cow, fs};
+use std::{
+    borrow::Cow,
+    fs,
+    io::{BufWriter, Write},
+    time::Instant,
+};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use capture::{begin_capture_impl, stop_long_capture_impl, AppState};
@@ -15,6 +21,65 @@ use tauri::{
 use tauri_plugin_global_shortcut::ShortcutState;
 
 const DEFAULT_SHORTCUT: &str = "CommandOrControl+Shift+X";
+
+fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| format!("无法访问系统剪贴板：{error}"))?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: image.width() as usize,
+            height: image.height() as usize,
+            bytes: Cow::Borrowed(image.as_raw()),
+        })
+        .map_err(|error| format!("写入剪贴板失败：{error}"))
+}
+
+#[tauri::command]
+async fn copy_capture_to_clipboard(
+    app: tauri::AppHandle,
+    capture_id: u64,
+    annotations: Vec<annotate::Annotation>,
+) -> Result<(), String> {
+    let source = app.state::<AppState>().images.get(capture_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let started = Instant::now();
+        let image = annotate::render_image(&source, annotations)?;
+        copy_image_to_clipboard(&image)?;
+        eprintln!(
+            "ScreenShot copy: {:.0} ms",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+        Ok(())
+    })
+    .await
+    .map_err(|error| format!("复制任务异常：{error}"))?
+}
+
+#[tauri::command]
+async fn save_capture(
+    app: tauri::AppHandle,
+    capture_id: u64,
+    path: String,
+    annotations: Vec<annotate::Annotation>,
+) -> Result<(), String> {
+    let source = app.state::<AppState>().images.get(capture_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = annotate::render_image(&source, annotations)?;
+        let file = fs::File::create(path).map_err(|error| format!("保存图片失败：{error}"))?;
+        let mut writer = BufWriter::new(file);
+        image_utils::write_png(&image, &mut writer)?;
+        writer
+            .flush()
+            .map_err(|error| format!("保存图片失败：{error}"))
+    })
+    .await
+    .map_err(|error| format!("保存任务异常：{error}"))?
+}
+
+#[tauri::command]
+fn release_capture(app: tauri::AppHandle, capture_id: u64) {
+    app.state::<AppState>().images.release(capture_id);
+}
 
 #[tauri::command]
 fn save_png(path: String, data_url: String) -> Result<(), String> {
@@ -111,26 +176,21 @@ pub fn run() {
                         stop_long_capture_impl(app);
                     }
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        capture::show_main_window(app);
                     }
                     "quit" => app.exit(0),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
                     if matches!(event, TrayIconEvent::DoubleClick { .. }) {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                        capture::show_main_window(tray.app_handle());
                     }
                 });
             if let Some(icon) = app.default_window_icon().cloned() {
                 tray = tray.icon(icon);
             }
             tray.build(app)?;
+            capture::prewarm_overlay_windows(app.handle().clone());
             capture::request_screen_capture_permission_at_launch(app.handle().clone());
             Ok(())
         })
@@ -139,6 +199,7 @@ pub fn run() {
             capture::get_overlay_snapshot,
             capture::show_overlay_window,
             capture::finish_region_capture,
+            capture::copy_region_to_clipboard,
             capture::start_long_capture,
             capture::stop_long_capture,
             capture::cancel_capture,
@@ -146,6 +207,9 @@ pub fn run() {
             annotate::render_annotations,
             save_png,
             copy_png_to_clipboard,
+            copy_capture_to_clipboard,
+            save_capture,
+            release_capture,
             default_shortcut,
         ])
         .run(tauri::generate_context!())
