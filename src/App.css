@@ -453,16 +453,34 @@ kbd {
 
 .handle {
   position: absolute;
+  width: min(20px, 100%);
+  height: min(20px, 100%);
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: 7px;
   height: 7px;
   border: 1px solid #0c1714;
   background: #72e0ba;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
 }
 
-.handle.nw { left: -4px; top: -4px; }
-.handle.ne { right: -4px; top: -4px; }
-.handle.sw { left: -4px; bottom: -4px; }
-.handle.se { right: -4px; bottom: -4px; }
+.handle.nw { left: -1px; top: -1px; transform: translate(-50%, -50%); cursor: nwse-resize; }
+.handle.ne { right: -1px; top: -1px; transform: translate(50%, -50%); cursor: nesw-resize; }
+.handle.sw { left: -1px; bottom: -1px; transform: translate(-50%, 50%); cursor: nesw-resize; }
+.handle.se { right: -1px; bottom: -1px; transform: translate(50%, 50%); cursor: nwse-resize; }
+.capture-overlay.resizing .handle { cursor: inherit; }
 
 .capture-toolbar {
   position: absolute;

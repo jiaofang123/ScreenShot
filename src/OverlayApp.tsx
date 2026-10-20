@@ -11,6 +11,19 @@ interface Selection {
 }
 
 type CaptureAction = "copy" | "edit" | "long";
+type SelectionCorner = "nw" | "ne" | "sw" | "se";
+
+interface DragSession {
+  pointerId: number;
+  offset: Point;
+}
+
+const selectionCorners = [
+  { corner: "nw", label: "左上角" },
+  { corner: "ne", label: "右上角" },
+  { corner: "sw", label: "左下角" },
+  { corner: "se", label: "右下角" },
+] as const;
 
 function normalizeSelection(start: Point, end: Point): Selection {
   return {
@@ -28,14 +41,17 @@ function OverlayApp() {
   const [snapshot, setSnapshot] = useState<OverlaySnapshot | null>(null);
   const [start, setStart] = useState<Point | null>(null);
   const [end, setEnd] = useState<Point | null>(null);
-  const [dragging, setDragging] = useState(false);
+  const [dragMode, setDragMode] = useState<"select" | "resize" | null>(null);
   const [operation, setOperation] = useState<CaptureAction | null>(null);
   const [instruction, setInstruction] = useState<string | null>(null);
   const revealedSession = useRef<number | null>(null);
   const processingSession = useRef<number | null>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const dragSession = useRef<DragSession | null>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const [toolbarSize, setToolbarSize] = useState({ width: 360, height: 48 });
   const processing = operation !== null;
+  const dragging = dragMode !== null;
 
   const selection = useMemo(
     () => (start && end ? normalizeSelection(start, end) : null),
@@ -60,10 +76,10 @@ function OverlayApp() {
       request += 1;
       revealedSession.current = null;
       processingSession.current = null;
+      stopDragging();
       setSnapshot(null);
       setStart(null);
       setEnd(null);
-      setDragging(false);
       setOperation(null);
       setInstruction(null);
     };
@@ -119,31 +135,69 @@ function OverlayApp() {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
-  function pointerPosition(event: React.PointerEvent): Point {
+  function pointerPosition(event: React.PointerEvent, offset: Point = { x: 0, y: 0 }): Point {
     return {
-      x: Math.max(0, Math.min(window.innerWidth, event.clientX)),
-      y: Math.max(0, Math.min(window.innerHeight, event.clientY)),
+      x: Math.max(0, Math.min(window.innerWidth, event.clientX + offset.x)),
+      y: Math.max(0, Math.min(window.innerHeight, event.clientY + offset.y)),
     };
   }
 
+  function stopDragging() {
+    const current = dragSession.current;
+    dragSession.current = null;
+    setDragMode(null);
+    if (current && overlayRef.current?.hasPointerCapture(current.pointerId)) {
+      overlayRef.current.releasePointerCapture(current.pointerId);
+    }
+  }
+
   function onPointerDown(event: React.PointerEvent<HTMLDivElement>) {
-    if (processingSession.current !== null || event.button !== 0) return;
+    if (processingSession.current !== null || dragSession.current || event.button !== 0) return;
     const point = pointerPosition(event);
+    dragSession.current = { pointerId: event.pointerId, offset: { x: 0, y: 0 } };
     setStart(point);
     setEnd(point);
-    setDragging(true);
+    setDragMode("select");
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
+  function onResizePointerDown(event: React.PointerEvent<HTMLButtonElement>, corner: SelectionCorner) {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!selection || processingSession.current !== null || dragSession.current || event.button !== 0) return;
+    const point = {
+      x: selection.x + (corner.endsWith("e") ? selection.width : 0),
+      y: selection.y + (corner.startsWith("s") ? selection.height : 0),
+    };
+    const anchor = {
+      x: selection.x + (corner.endsWith("w") ? selection.width : 0),
+      y: selection.y + (corner.startsWith("n") ? selection.height : 0),
+    };
+    // Keep the grab offset so clicking the enlarged handle does not move the corner.
+    dragSession.current = {
+      pointerId: event.pointerId,
+      offset: { x: point.x - event.clientX, y: point.y - event.clientY },
+    };
+    setStart(anchor);
+    setEnd(point);
+    setDragMode("resize");
+    overlayRef.current?.setPointerCapture(event.pointerId);
+  }
+
   function onPointerMove(event: React.PointerEvent<HTMLDivElement>) {
-    if (dragging) setEnd(pointerPosition(event));
+    const current = dragSession.current;
+    if (current?.pointerId === event.pointerId) setEnd(pointerPosition(event, current.offset));
   }
 
   function onPointerUp(event: React.PointerEvent<HTMLDivElement>) {
-    if (!dragging) return;
-    setEnd(pointerPosition(event));
-    setDragging(false);
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    const current = dragSession.current;
+    if (current?.pointerId !== event.pointerId) return;
+    setEnd(pointerPosition(event, current.offset));
+    stopDragging();
+  }
+
+  function onPointerCancel(event: React.PointerEvent<HTMLDivElement>) {
+    if (dragSession.current?.pointerId === event.pointerId) stopDragging();
   }
 
   function toPhysicalRegion(): CaptureRegion | null {
@@ -166,7 +220,7 @@ function OverlayApp() {
 
   async function finish(kind: CaptureAction) {
     const region = toPhysicalRegion();
-    if (!region || processingSession.current !== null) return;
+    if (!region || processingSession.current !== null || dragSession.current) return;
     processingSession.current = region.sessionId;
     setOperation(kind);
     setInstruction(null);
@@ -204,10 +258,16 @@ function OverlayApp() {
 
   return (
     <div
-      className="capture-overlay"
+      ref={overlayRef}
+      className={`capture-overlay${dragMode === "resize" ? " resizing" : ""}`}
+      style={{ cursor: dragMode === "resize" && start && end
+        ? (end.x < start.x) === (end.y < start.y) ? "nwse-resize" : "nesw-resize"
+        : undefined }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={onPointerCancel}
+      onLostPointerCapture={onPointerCancel}
       onContextMenu={(event) => {
         event.preventDefault();
         if (processingSession.current === null) void invoke("cancel_capture");
@@ -259,10 +319,12 @@ function OverlayApp() {
               {Math.round(selection.width * (snapshot.width / window.innerWidth))} ×{" "}
               {Math.round(selection.height * (snapshot.height / window.innerHeight))}
             </span>
-            <i className="handle nw" />
-            <i className="handle ne" />
-            <i className="handle sw" />
-            <i className="handle se" />
+            {selectionCorners.map(({ corner, label }) => (
+              <button key={corner} type="button" className={`handle ${corner}`}
+                aria-label={`拖动${label}调整选区`} title={`拖动${label}调整选区`}
+                tabIndex={-1} disabled={processing}
+                onPointerDown={(event) => onResizePointerDown(event, corner)} />
+            ))}
           </div>
         </>
       ) : (
@@ -299,7 +361,7 @@ function OverlayApp() {
 
       <div className="overlay-hint">
         <strong>{snapshot.name}</strong>
-        <span>拖动框选 · Enter 复制 · 右键或 Esc 取消</span>
+        <span>拖动框选 · 拖动四角调整 · Enter 复制 · Esc 取消</span>
       </div>
       {instruction && <div className="overlay-instruction">{instruction}</div>}
     </div>
