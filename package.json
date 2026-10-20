@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "media:install": "npm install --prefix src-tauri/studio --omit=dev",
+    "media:prepare": "node scripts/prepare-media.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

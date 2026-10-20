@@ -159,6 +159,251 @@ pub struct PreparedRecording {
 }
 
 impl RecordingManager {
+    pub fn start_native(
+        &self,
+        app: AppHandle,
+        options: RecordingOptions,
+        source: serde_json::Value,
+        path: PathBuf,
+    ) -> Result<RecordingStatus, String> {
+        if !cfg!(target_os = "macos") {
+            return Err("当前系统请使用浏览器兼容录屏".into());
+        }
+        if !path.is_absolute()
+            || !path.parent().is_some_and(Path::is_dir)
+            || path.is_dir()
+            || !matches!(options.fps, 15 | 30 | 60)
+        {
+            return Err("保存路径或帧率无效".into());
+        }
+        if options.mode == RecordingMode::Tab {
+            return Err("单页签请使用浏览器授权录制".into());
+        }
+        let mut current = self.current.lock();
+        if current
+            .as_ref()
+            .is_some_and(|session| session.status.lock().active())
+        {
+            return Err("已有录屏任务，请先停止".into());
+        }
+        let helper = crate::studio::resource(&app, "runtime/screenshot-recorder");
+        if !helper.is_file() {
+            return Err("未找到原生录屏组件，请重新打包安装".into());
+        }
+        let destination = path.with_extension("mp4");
+        if destination != path && destination.exists() {
+            return Err("同名 MP4 已存在，请更换文件名".into());
+        }
+        let temporary =
+            destination.with_file_name(format!(".ScreenShot-{}.partial.mp4", Uuid::new_v4()));
+        let mix_audio = options.audio && source["microphone"] == true;
+        let mut config = serde_json::to_value(&options).map_err(|e| e.to_string())?;
+        for key in ["sourceId", "crop", "microphone", "cursor", "clicks"] {
+            if let Some(value) = source.get(key) {
+                config[key] = value.clone();
+            }
+        }
+        let mut child = Command::new(helper)
+            .arg(config.to_string())
+            .arg(&temporary)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("无法启动原生录屏：{e}"))?;
+        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+        let output = child.stdout.take().unwrap();
+        let child = Arc::new(Mutex::new(child));
+        let status = RecordingStatus {
+            id: Uuid::new_v4().to_string(),
+            mode: options.mode,
+            phase: "waiting".into(),
+            message: "正在启动本机录屏…".into(),
+            elapsed_ms: 0,
+            bytes_written: 0,
+            file_path: None,
+            browser: "macOS 原生录屏".into(),
+            source_name: source["name"].as_str().unwrap_or("").into(),
+            width: 0,
+            height: 0,
+            has_audio: options.audio,
+            options: options.clone(),
+            stop_shortcut_available: self.stop_shortcut_available.load(Ordering::Acquire),
+        };
+        let event_app = app.clone();
+        let sink: EventSink = Arc::new(move |status| {
+            let manager = event_app.state::<RecordingManager>();
+            if manager
+                .status()
+                .is_some_and(|current| current.id == status.id)
+            {
+                let _ = event_app.emit_to("main", "recording-status", &status);
+                if !status.active() {
+                    if manager.quit_when_finished.load(Ordering::Acquire) {
+                        event_app.exit(0);
+                    } else {
+                        crate::capture::show_main_window(&event_app);
+                    }
+                }
+            }
+        });
+        let session = Arc::new(Session {
+            status: Mutex::new(status.clone()),
+            options,
+            desired: AtomicU8::new(CONTINUE),
+            disconnected: AtomicBool::new(false),
+            connected: AtomicBool::new(true),
+            shutdown: AtomicBool::new(false),
+            stop_requested_at: Mutex::new(None),
+            url: String::new(),
+            sink,
+        });
+        if let Some(previous) = current.replace(session.clone()) {
+            previous.shutdown.store(true, Ordering::Release);
+        }
+        drop(current);
+        (session.sink)(status.clone());
+        let controller = session.clone();
+        let process = child.clone();
+        let temporary_metrics = temporary.clone();
+        thread::spawn(move || {
+            let mut previous = CONTINUE;
+            let mut elapsed = 0;
+            let mut last = Instant::now();
+            let mut tick = Instant::now();
+            while controller.status.lock().active() {
+                let command = controller.desired.load(Ordering::Acquire);
+                if command != previous {
+                    let name = match command {
+                        PAUSE => "pause",
+                        STOP | CANCEL => "stop",
+                        _ => "resume",
+                    };
+                    let _ = writeln!(input.lock(), "{name}");
+                    previous = command;
+                }
+                let phase = controller.status.lock().phase.clone();
+                if phase == "recording" {
+                    elapsed += last.elapsed().as_millis() as u64;
+                }
+                last = Instant::now();
+                if tick.elapsed() >= Duration::from_secs(1) {
+                    let bytes = std::fs::metadata(&temporary_metrics)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    controller.update(|status| {
+                        status.elapsed_ms = elapsed;
+                        status.bytes_written = bytes;
+                    });
+                    tick = Instant::now();
+                }
+                if controller
+                    .stop_requested_at
+                    .lock()
+                    .is_some_and(|since| since.elapsed() > Duration::from_secs(30))
+                {
+                    let _ = process.lock().kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+        });
+        thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            let mut saved = false;
+            let mut message = "原生录屏进程已结束".to_string();
+            for line in BufReader::new(output).lines().map_while(Result::ok) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                    continue;
+                };
+                match value["event"].as_str().unwrap_or("") {
+                    "started" => {
+                        session.update(|status| {
+                            status.phase = "recording".into();
+                            status.message = "原生录屏进行中".into();
+                            status.width = value["width"].as_u64().unwrap_or(0) as u32;
+                            status.height = value["height"].as_u64().unwrap_or(0) as u32;
+                            status.has_audio = value["hasAudio"] == true;
+                        });
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    }
+                    "paused" => session.update(|s| {
+                        s.phase = "paused".into();
+                        s.message = "录屏已暂停".into();
+                    }),
+                    "resumed" => session.update(|s| {
+                        s.phase = "recording".into();
+                        s.message = "原生录屏进行中".into();
+                    }),
+                    "saved" => {
+                        saved = true;
+                    }
+                    "error" => {
+                        message = value["message"].as_str().unwrap_or("原生录屏失败").into();
+                    }
+                    _ => {}
+                }
+            }
+            let _ = child.lock().wait();
+            if saved && mix_audio {
+                session.update(|status| {
+                    status.phase = "saving".into();
+                    status.message = "正在合并系统声音和麦克风…".into();
+                });
+                if let Err(error) = crate::studio::mix_recording_audio(&app, &temporary) {
+                    saved = false;
+                    message = error;
+                }
+            }
+            let bytes = std::fs::metadata(&temporary).map(|m| m.len()).unwrap_or(0);
+            if saved && bytes > 0 {
+                let commit = if destination == path {
+                    std::fs::rename(&temporary, &destination)
+                } else {
+                    std::fs::hard_link(&temporary, &destination)
+                        .and_then(|_| std::fs::remove_file(&temporary))
+                };
+                if let Err(error) = commit {
+                    saved = false;
+                    message = format!("视频提交失败：{error}");
+                }
+            } else {
+                saved = false;
+            }
+            let final_path = if saved {
+                Some(destination)
+            } else if bytes > 0 {
+                let recovery = path.with_file_name(format!(
+                    "{}-未完成-{}.mp4",
+                    path.file_stem().unwrap_or_default().to_string_lossy(),
+                    &Uuid::new_v4().simple().to_string()[..8]
+                ));
+                if std::fs::rename(&temporary, &recovery).is_ok() {
+                    Some(recovery)
+                } else {
+                    Some(temporary.clone())
+                }
+            } else {
+                let _ = std::fs::remove_file(&temporary);
+                None
+            };
+            session.update(|status| {
+                status.phase = if saved { "saved" } else { "error" }.into();
+                status.message = if saved {
+                    "录屏已保存".into()
+                } else {
+                    message
+                };
+                status.bytes_written = bytes;
+                status.file_path = final_path.map(|p| p.to_string_lossy().into_owned());
+            });
+            session.shutdown.store(true, Ordering::Release);
+        });
+        Ok(status)
+    }
+
     pub fn status(&self) -> Option<RecordingStatus> {
         self.current
             .lock()
@@ -277,6 +522,69 @@ impl RecordingManager {
             status,
         })
     }
+}
+
+#[tauri::command]
+pub fn native_recording_available() -> bool {
+    cfg!(target_os = "macos")
+}
+
+#[tauri::command]
+pub async fn native_capture_sources(app: AppHandle) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = Command::new(crate::studio::resource(&app, "runtime/screenshot-recorder"))
+            .arg("list")
+            .output()
+            .map_err(|e| e.to_string())?;
+        let data: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|_| "无法读取录屏来源，请检查 ScreenShot 的屏幕录制权限")?;
+        if !output.status.success() {
+            return Err(data["message"]
+                .as_str()
+                .unwrap_or("请检查屏幕录制权限")
+                .into());
+        }
+        Ok(data["sources"].clone())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn native_source_preview(kind: String, id: u32) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let image = if kind == "window" {
+            xcap::Window::all()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|w| w.id().ok() == Some(id))
+                .ok_or("窗口不存在")?
+                .capture_image()
+                .map_err(|e| e.to_string())?
+        } else {
+            xcap::Monitor::all()
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|m| m.id().ok() == Some(id))
+                .ok_or("屏幕不存在")?
+                .capture_image()
+                .map_err(|e| e.to_string())?
+        };
+        crate::image_utils::image_to_preview_data_url(&image, 1.0)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn start_native_recording(
+    app: AppHandle,
+    state: State<'_, RecordingManager>,
+    options: RecordingOptions,
+    source: serde_json::Value,
+    path: String,
+) -> Result<RecordingStatus, String> {
+    state.start_native(app, options, source, path.into())
 }
 
 impl Drop for RecordingManager {

@@ -10,6 +10,25 @@
 .mode-tabs { display: flex; gap: 5px; max-width: 1120px; margin: -10px auto 20px; }
 .mode-tabs button { padding: 9px 28px; color: #91a1b5; background: transparent; border: 1px solid transparent; border-radius: 9px; cursor: pointer; font-size: 13px; }
 .mode-tabs button.selected { color: #9cf1d0; border-color: #31594a; background: #163027; }
+.editing-workspace.home-shell { padding: 12px 16px 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.editing-workspace .app-header { width: 100%; max-width: none; margin: 0 0 8px; flex-shrink: 0; }
+.editing-workspace .app-header .brand-mark { width: 32px; height: 32px; }
+.editing-workspace .app-header h1 { font-size: 18px; }
+.editing-workspace .app-header p { font-size: 11px; }
+.editing-workspace .mode-tabs { margin: 0 0 8px; flex-shrink: 0; max-width: none; }
+.studio-workspace { flex: 1; min-height: 0; width: 100%; }
+.studio-workspace[hidden] { display: none; }
+.studio-workspace iframe { display: block; width: 100%; height: 100%; border: 0; border-radius: 12px 12px 0 0; background: #101620; }
+.native-recording-panel { margin-bottom: 18px; }
+.recording-sources[hidden] { display: none; }
+.native-recording-panel select[aria-label="录制目标"] { max-width: 500px; }
+.native-region { color: #9aadc1; font-size: 11px; margin: 14px 0; }
+.native-region-stage { position: relative; max-width: 600px; margin: 10px auto; line-height: 0; overflow: hidden; border: 1px solid #385347; border-radius: 6px; touch-action: none; user-select: none; cursor: crosshair; }
+.native-region-stage img { display: block; width: 100%; pointer-events: none; }
+.native-region-crop { position: absolute; border: 1px solid #72e0ba; box-shadow: 0 0 0 200vmax #0008; pointer-events: none; }
+.region-handle { position: absolute; width: 14px; height: 14px; background: #72e0ba; border: 1px solid #133b2c; pointer-events: auto; }
+.region-handle.nw { top:-7px;left:-7px;cursor:nwse-resize; }.region-handle.ne { top:-7px;right:-7px;cursor:nesw-resize; }
+.region-handle.sw { bottom:-7px;left:-7px;cursor:nesw-resize; }.region-handle.se { bottom:-7px;right:-7px;cursor:nwse-resize; }
 .recording-panel { max-width: 1120px; margin: auto; padding: 28px 30px; border: 1px solid #253142; border-radius: 20px; background: linear-gradient(140deg, #141e29, #0e141e); }
 .recording-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .recording-heading h2 { margin: 8px 0 0; font-size: 27px; letter-spacing: -.04em; }

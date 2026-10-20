@@ -1,8 +1,9 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import AnnotationEditor from "./components/AnnotationEditor";
 import RecordingPanel from "./components/RecordingPanel";
+import StudioWorkspace from "./components/StudioWorkspace";
 import type { CapturePayload, LongCaptureStatus } from "./types";
 
 function App() {
@@ -11,7 +12,19 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [longStatus, setLongStatus] = useState<LongCaptureStatus | null>(null);
-  const [page, setPage] = useState<"capture" | "record">("capture");
+  const [page, setPage] = useState<"capture" | "record" | "studio">("capture");
+  const [studioOpened, setStudioOpened] = useState(false);
+  const [studioRecording, setStudioRecording] = useState<string | null>(null);
+  const [recordingForStudio, setRecordingForStudio] = useState(false);
+  const switchPage = useCallback((next: "capture" | "record" | "studio") => {
+    void invoke("switch_workspace", { editing: next === "studio" }).then(() => {
+      if (next === "studio") setStudioOpened(true);
+      setPage(next);
+    }).catch(error => setMessage(`切换工作区失败：${String(error)}`));
+  }, []);
+  const requestRecording = useCallback(() => { setRecordingForStudio(true); switchPage("record"); }, [switchPage]);
+  const recordingToStudio = useCallback((path: string) => { setStudioRecording(path); switchPage("studio"); }, [switchPage]);
+  const importedRecording = useCallback(() => { setStudioRecording(null); setRecordingForStudio(false); }, []);
 
   useEffect(() => {
     invoke<string>("default_shortcut")
@@ -25,6 +38,8 @@ function App() {
         setMessage("图片已复制到剪贴板，可以直接粘贴");
       }),
       listen<CapturePayload>("capture-ready", ({ payload }) => {
+        void invoke("switch_workspace", { editing: false }).catch(() => undefined);
+        setPage("capture");
         setCapture(payload);
         setBusy(false);
         setLongStatus(null);
@@ -79,24 +94,27 @@ function App() {
   }
 
   return (
-    <main className="home-shell">
+    <main className={`home-shell ${page === "studio" ? "editing-workspace" : ""}`}>
       <header className="app-header">
         <div className="brand-mark" aria-hidden="true">
           <span />
         </div>
         <div>
           <h1>ScreenShot</h1>
-          <p>轻快、私密，截图之后立刻能用。</p>
+          <p>{page === "studio" ? "录制演示，添加旁白，合成成片。" : "轻快、私密，截图之后立刻能用。"}</p>
         </div>
-        <div className="privacy-pill">完全本地处理</div>
+        <div className="privacy-pill">{page === "studio" ? "视频本机处理 · 在线语音需联网" : "完全本地处理"}</div>
       </header>
 
       <nav className="mode-tabs" aria-label="工具模式">
-        <button className={page === "capture" ? "selected" : ""} onClick={() => setPage("capture")}>截图</button>
-        <button className={page === "record" ? "selected" : ""} onClick={() => setPage("record")}>录屏</button>
+        <button className={page === "capture" ? "selected" : ""} onClick={() => switchPage("capture")}>截图</button>
+        <button className={page === "record" ? "selected" : ""} onClick={() => { setRecordingForStudio(false); switchPage("record"); }}>录屏</button>
+        <button className={page === "studio" ? "selected" : ""} onClick={() => switchPage("studio")}>视频制作</button>
+        {page === "studio" && <button onClick={() => { void invoke("toggle_studio_fullscreen").catch(error => setMessage(String(error))); }}>全屏 / 退出全屏</button>}
       </nav>
 
-      {page === "record" ? <RecordingPanel onNotify={setMessage} /> : <>
+      {studioOpened && <StudioWorkspace visible={page === "studio"} recording={studioRecording} onImported={importedRecording} onRecord={requestRecording} onNotify={setMessage} />}
+      {page === "record" ? <RecordingPanel onNotify={setMessage} onEditVideo={recordingToStudio} defaultEditAfter={recordingForStudio} /> : page === "capture" ? <>
 
       <section className="hero-card">
         <div className="hero-copy">
@@ -154,11 +172,11 @@ function App() {
         </article>
       </section>
 
-      </>}
-      <footer className="home-footer">
+      </> : null}
+      {page !== "studio" && <footer className="home-footer">
         <span>关闭窗口后仍在托盘运行</span>
         <span>Windows · macOS</span>
-      </footer>
+      </footer>}
 
       {longStatus && (
         <div className="status-toast persistent">

@@ -8,6 +8,8 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+src-tauri/resources/runtime/
+src-tauri/resources/studio/
 dist
 dist-ssr
 *.local

@@ -8,6 +8,15 @@ use std::{
 #[path = "../src/recording.rs"]
 #[allow(dead_code)]
 mod recording;
+#[path = "../src/studio.rs"]
+#[allow(dead_code)]
+mod studio;
+mod capture {
+    pub fn show_main_window(_: &tauri::AppHandle) {}
+}
+#[path = "../src/image_utils.rs"]
+#[allow(dead_code)]
+mod image_utils;
 
 fn main() {
     let mut args = std::env::args().skip(1);

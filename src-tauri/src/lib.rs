@@ -4,6 +4,7 @@ mod capture_cache;
 mod image_utils;
 mod recording;
 mod stitch;
+mod studio;
 
 use std::{
     borrow::Cow,
@@ -150,10 +151,12 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::default())
         .manage(RecordingManager::default())
+        .manage(studio::StudioState::default())
         .plugin(shortcut_plugin)
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            studio::restore_layouts(app.handle());
             let recording_shortcut = app
                 .global_shortcut()
                 .register(STOP_RECORDING_SHORTCUT)
@@ -164,8 +167,10 @@ pub fn run() {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("ScreenShot");
                 let window_for_close = window.clone();
+                let app_for_close = app.handle().clone();
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
+                        studio::remember_layout(&app_for_close);
                         api.prevent_close();
                         let _ = window_for_close.hide();
                     }
@@ -249,11 +254,20 @@ pub fn run() {
             recording::recording_control,
             recording::reopen_recording_browser,
             recording::reveal_recording,
+            recording::native_recording_available,
+            recording::native_capture_sources,
+            recording::native_source_preview,
+            recording::start_native_recording,
+            studio::studio_call,
+            studio::studio_reveal,
+            studio::switch_workspace,
+            studio::toggle_studio_fullscreen,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ScreenShot")
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                studio::remember_layout(app);
                 let manager = app.state::<RecordingManager>();
                 if manager.is_active() {
                     api.prevent_exit();
