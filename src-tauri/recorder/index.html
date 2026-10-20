@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ScreenShot · 本机录屏</title>
+  <link rel="stylesheet" href="recorder.css" />
+  <script type="module" src="recorder.js"></script>
+</head>
+<body>
+  <main>
+    <header><div class="logo">◉</div><div><h1>ScreenShot 录屏</h1><p>选择共享来源，录制内容直接保存到本机</p></div><span class="local">本机录制</span></header>
+    <section class="card">
+      <div class="heading"><div><span class="eyebrow">SCREEN RECORDING</span><h2 id="title">正在连接 ScreenShot…</h2></div><span id="phase" class="badge">准备中</span></div>
+      <p id="instructions" class="muted">请保持 ScreenShot 应用运行。</p>
+      <div id="notice" role="status" class="notice" hidden></div>
+      <div class="controls">
+        <button id="choose" class="primary" disabled>选择录制内容</button>
+        <button id="start" class="primary" hidden>开始录制选区</button>
+        <button id="pause" hidden>暂停</button>
+        <button id="stop" class="danger" hidden>停止并保存</button>
+        <button id="cancel">取消录制</button>
+      </div>
+      <div id="metrics" class="metrics" hidden><strong id="elapsed">00:00</strong><span id="source"></span><span id="format"></span></div>
+      <div id="preview-wrap" class="preview-wrap" hidden>
+        <div id="preview-stage" class="preview-stage">
+          <video id="preview" muted autoplay playsinline></video>
+          <div id="crop" class="crop" hidden>
+            <span id="crop-size"></span>
+            <button class="handle nw" data-corner="nw" aria-label="调整左上角"></button>
+            <button class="handle ne" data-corner="ne" aria-label="调整右上角"></button>
+            <button class="handle sw" data-corner="sw" aria-label="调整左下角"></button>
+            <button class="handle se" data-corner="se" aria-label="调整右下角"></button>
+          </div>
+        </div>
+        <p id="crop-help" class="muted" hidden>在预览画面上拖动框选，拖动四角可调整范围。确认后点击“开始录制选区”。</p>
+      </div>
+      <div id="saved" class="saved" hidden><h3>视频已保存</h3><p id="saved-path"></p><p class="muted">可回到 ScreenShot 打开所在文件夹；此页现在可以关闭。</p></div>
+    </section>
+    <footer><span id="stop-help">可从 ScreenShot 工具按钮或托盘菜单停止录屏</span><br />共享声音取决于浏览器和所选来源；不采集麦克风。请保留此页面，停止后会自动保存。</footer>
+  </main>
+</body>
+</html>

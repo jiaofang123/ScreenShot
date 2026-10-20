@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import AnnotationEditor from "./components/AnnotationEditor";
+import RecordingPanel from "./components/RecordingPanel";
 import type { CapturePayload, LongCaptureStatus } from "./types";
 
 function App() {
@@ -10,6 +11,7 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [longStatus, setLongStatus] = useState<LongCaptureStatus | null>(null);
+  const [page, setPage] = useState<"capture" | "record">("capture");
 
   useEffect(() => {
     invoke<string>("default_shortcut")
@@ -89,6 +91,13 @@ function App() {
         <div className="privacy-pill">完全本地处理</div>
       </header>
 
+      <nav className="mode-tabs" aria-label="工具模式">
+        <button className={page === "capture" ? "selected" : ""} onClick={() => setPage("capture")}>截图</button>
+        <button className={page === "record" ? "selected" : ""} onClick={() => setPage("record")}>录屏</button>
+      </nav>
+
+      {page === "record" ? <RecordingPanel onNotify={setMessage} /> : <>
+
       <section className="hero-card">
         <div className="hero-copy">
           <span className="eyebrow">READY WHEN YOU ARE</span>
@@ -145,6 +154,7 @@ function App() {
         </article>
       </section>
 
+      </>}
       <footer className="home-footer">
         <span>关闭窗口后仍在托盘运行</span>
         <span>Windows · macOS</span>

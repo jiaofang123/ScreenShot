@@ -7,6 +7,43 @@
   -webkit-font-smoothing: antialiased;
 }
 
+.mode-tabs { display: flex; gap: 5px; max-width: 1120px; margin: -10px auto 20px; }
+.mode-tabs button { padding: 9px 28px; color: #91a1b5; background: transparent; border: 1px solid transparent; border-radius: 9px; cursor: pointer; font-size: 13px; }
+.mode-tabs button.selected { color: #9cf1d0; border-color: #31594a; background: #163027; }
+.recording-panel { max-width: 1120px; margin: auto; padding: 28px 30px; border: 1px solid #253142; border-radius: 20px; background: linear-gradient(140deg, #141e29, #0e141e); }
+.recording-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.recording-heading h2 { margin: 8px 0 0; font-size: 27px; letter-spacing: -.04em; }
+.recording-heading .eyebrow { margin: 0; }
+.recording-badge { color: #8ea2b6; border: 1px solid #334356; border-radius: 20px; padding: 6px 12px; font-size: 11px; white-space: nowrap; }
+.recording-badge.active { color: #a1edce; border-color: #3a6b55; }
+.recording-intro { margin: 15px 0 20px; color: #94a3b5; font-size: 12px; line-height: 1.8; }
+.recording-sources { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 0; padding: 0; border: 0; }
+.recording-sources legend { padding: 0; margin-bottom: 10px; color: #a7b5c5; font-size: 12px; }
+.recording-source { position: relative; display: flex; align-items: center; gap: 12px; min-height: 78px; padding: 15px; border: 1px solid #2b3c4d; border-radius: 11px; cursor: pointer; background: #121d29; }
+.recording-source.selected { border-color: #6acda9; background: #172f2a; }
+.recording-source input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.recording-source:focus-within { outline: 2px solid #72e0ba; outline-offset: 2px; }
+.recording-source-icon { font-size: 26px; color: #84dcbc; }
+.recording-source strong { display: block; font-size: 13px; font-weight: 600; }
+.recording-source small { display: block; margin-top: 7px; color: #92a4b5; font-size: 11px; line-height: 1.6; }
+.recording-sources:disabled .recording-source { cursor: default; opacity: .65; }
+.recording-options { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; margin: 20px 0; }
+.recording-options label { display: flex; align-items: center; gap: 8px; color: #aebcce; font-size: 12px; }
+.recording-options select { color: #d9e6f2; border: 1px solid #3c4c60; border-radius: 6px; background: #162232; padding: 6px 10px; }
+.recording-audio { cursor: pointer; }
+.recording-audio input { accent-color: #72e0ba; }
+.recording-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 18px 0; }
+.record-dot { display: block; width: 10px; height: 10px; border-radius: 50%; background: #185439; }
+.recording-secondary, .recording-stop { padding: 11px 17px; border: 1px solid #3c5067; border-radius: 9px; background: #1c2b3c; color: #d0dfec; font-size: 12px; cursor: pointer; }
+.recording-stop { color: #ffb4ba; border-color: #74444b; background: #3b222a; }
+.recording-status { display: flex; flex-direction: column; gap: 7px; padding: 14px 16px; color: #a3d6c0; border: 1px solid #2c5243; background: #11271f; border-radius: 10px; font-size: 12px; line-height: 1.7; }
+.recording-status strong { font-weight: 500; }
+.recording-status span { color: #97b0a4; font-size: 11px; }
+.recording-status.error { color: #ffb4ba; background: #311d24; border-color: #62333d; }
+.recording-path { word-break: break-all; }
+.recording-note { margin: 16px 0 0; color: #8194a7; font-size: 11px; line-height: 2; }
+.recording-note kbd { color: #a3b7c8; font-size: 10px; }
+
 * {
   box-sizing: border-box;
 }

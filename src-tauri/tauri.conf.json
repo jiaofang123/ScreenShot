@@ -30,8 +30,8 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "快速框选、滚动长截图和标注",
-    "longDescription": "跨平台桌面截图工具，支持框选、手动滚动长截图、标注、打码和自动复制。",
+    "shortDescription": "截图、标注和本机录屏",
+    "longDescription": "跨平台桌面截图与录屏工具，支持框选、手动滚动长截图、文字标注、打码、自动复制，以及应用窗口、浏览器页签、桌面与区域录屏。",
     "macOS": {
       "minimumSystemVersion": "12.3",
       "signingIdentity": "-"

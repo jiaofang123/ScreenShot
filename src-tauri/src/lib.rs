@@ -2,6 +2,7 @@ mod annotate;
 mod capture;
 mod capture_cache;
 mod image_utils;
+mod recording;
 mod stitch;
 
 use std::{
@@ -13,14 +14,16 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use capture::{begin_capture_impl, stop_long_capture_impl, AppState};
+use recording::RecordingManager;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
     Manager, WindowEvent,
 };
-use tauri_plugin_global_shortcut::ShortcutState;
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 const DEFAULT_SHORTCUT: &str = "CommandOrControl+Shift+X";
+const STOP_RECORDING_SHORTCUT: &str = "CommandOrControl+Alt+Shift+R";
 
 fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
     let mut clipboard =
@@ -119,8 +122,15 @@ pub fn run() {
     let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
         .with_shortcut(DEFAULT_SHORTCUT)
         .expect("invalid default shortcut")
-        .with_handler(|app, _shortcut, event| {
+        .with_handler(|app, shortcut, event| {
             if event.state != ShortcutState::Pressed {
+                return;
+            }
+            let stop: tauri_plugin_global_shortcut::Shortcut = STOP_RECORDING_SHORTCUT
+                .parse()
+                .expect("invalid recording shortcut");
+            if shortcut == &stop {
+                let _ = app.state::<RecordingManager>().control("stop");
                 return;
             }
 
@@ -139,10 +149,18 @@ pub fn run() {
 
     tauri::Builder::default()
         .manage(AppState::default())
+        .manage(RecordingManager::default())
         .plugin(shortcut_plugin)
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            let recording_shortcut = app
+                .global_shortcut()
+                .register(STOP_RECORDING_SHORTCUT)
+                .is_ok();
+            app.state::<RecordingManager>()
+                .stop_shortcut_available
+                .store(recording_shortcut, std::sync::atomic::Ordering::Release);
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_title("ScreenShot");
                 let window_for_close = window.clone();
@@ -157,8 +175,19 @@ pub fn run() {
             let capture_item = MenuItem::with_id(app, "capture", "开始截图", true, None::<&str>)?;
             let show_item = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
             let stop_item = MenuItem::with_id(app, "stop", "停止长截图", true, None::<&str>)?;
+            let stop_recording_item =
+                MenuItem::with_id(app, "stop-recording", "停止录屏并保存", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture_item, &stop_item, &show_item, &quit_item])?;
+            let menu = Menu::with_items(
+                app,
+                &[
+                    &capture_item,
+                    &stop_item,
+                    &stop_recording_item,
+                    &show_item,
+                    &quit_item,
+                ],
+            )?;
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("ScreenShot · Ctrl/Cmd + Shift + X")
@@ -174,6 +203,9 @@ pub fn run() {
                     }
                     "stop" => {
                         stop_long_capture_impl(app);
+                    }
+                    "stop-recording" => {
+                        let _ = app.state::<RecordingManager>().control("stop");
                     }
                     "show" => {
                         capture::show_main_window(app);
@@ -211,7 +243,25 @@ pub fn run() {
             save_capture,
             release_capture,
             default_shortcut,
+            recording::get_recording_status,
+            recording::get_recording_browsers,
+            recording::start_recording_session,
+            recording::recording_control,
+            recording::reopen_recording_browser,
+            recording::reveal_recording,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ScreenShot");
+        .build(tauri::generate_context!())
+        .expect("error while building ScreenShot")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let manager = app.state::<RecordingManager>();
+                if manager.is_active() {
+                    api.prevent_exit();
+                    manager
+                        .quit_when_finished
+                        .store(true, std::sync::atomic::Ordering::Release);
+                    let _ = manager.control("stop");
+                }
+            }
+        });
 }
