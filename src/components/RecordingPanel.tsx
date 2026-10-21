@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -7,7 +7,7 @@ import BrowserRecordingPanel from "./BrowserRecordingPanel";
 type Mode = "window" | "tab" | "desktop" | "region";
 type Source = { id: number; kind: string; name: string; width: number; height: number };
 type Crop = { x: number; y: number; width: number; height: number };
-type Status = { mode?: Mode; phase: string; message: string; filePath: string | null; width: number; height: number; elapsedMs: number; bytesWritten: number; browser: string };
+type Status = { id: string; mode?: Mode; phase: string; message: string; filePath: string | null; width: number; height: number; elapsedMs: number; bytesWritten: number; browser: string };
 const modes: {value:Mode;label:string;description:string;icon:string}[] = [
   {value:"window",label:"应用窗口",description:"在工具内选择具体窗口",icon:"▣"},
   {value:"tab",label:"浏览器页签",description:"独立页签通过浏览器授权",icon:"▤"},
@@ -26,21 +26,35 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
   const [editAfter,setEditAfter]=useState(defaultEditAfter);
   const stage=useRef<HTMLDivElement>(null), drag=useRef<{id:number;anchor:{x:number;y:number};offset:{x:number;y:number}}|null>(null);
   const editAfterRef=useRef(defaultEditAfter),completed=useRef<string|null>(null);
+  const startedSession=useRef<string|null>(null),latestStatus=useRef<Status|null>(null);
+  const importCompleted=useCallback((value:Status|null)=>{
+    if(value?.phase==='saved'&&value.filePath&&value.id===startedSession.current&&editAfterRef.current&&completed.current!==value.id){
+      completed.current=value.id;startedSession.current=null;onEditVideo(value.filePath);
+    }
+  },[onEditVideo]);
+  const recordingStarted=useCallback((value:Status)=>{
+    startedSession.current=value.id;
+    // Completion can arrive before the start command returns; keep that newer event.
+    if(latestStatus.current?.id===value.id){setStatus(latestStatus.current);importCompleted(latestStatus.current);}
+    else{latestStatus.current=value;setStatus(value);}
+  },[importCompleted]);
   const active=!!status&&!['saved','cancelled','error'].includes(status.phase);
   const source=sources.find(item=>item.id===sourceId&&item.kind===(mode==='window'?'window':'desktop'));
   const available=sources.filter(item=>item.kind===(mode==='window'?'window':'desktop'));
   useEffect(()=>{void invoke<boolean>('native_recording_available').then(setNative).catch(()=>setNative(false));},[]);
   useEffect(()=>{
-    let mounted=true;
-    function update(value:Status|null) {
-      if (!mounted) return;setStatus(value);
+    let mounted=true,receivedEvent=false;
+    function update(value:Status|null,live=false) {
+      if (!mounted||(startedSession.current&&value&&value.id!==startedSession.current)) return;
+      latestStatus.current=value;setStatus(value);
       if(value?.mode && !["saved","cancelled","error"].includes(value.phase)) setMode(value.mode);
-      if(value?.phase==='saved'&&value.filePath&&editAfterRef.current&&completed.current!==value.filePath){completed.current=value.filePath;onEditVideo(value.filePath);}
+      if(live)importCompleted(value);
     }
-    const unlisten=listen<Status>('recording-status',({payload})=>update(payload));
-    void unlisten.then(()=>invoke<Status|null>('get_recording_status')).then(update).catch(()=>undefined);
+    const unlisten=listen<Status>('recording-status',({payload})=>{receivedEvent=true;update(payload,true);});
+    // Restoring an old snapshot is for display only, never a new recording result.
+    void unlisten.then(()=>invoke<Status|null>('get_recording_status')).then(value=>{if(!receivedEvent)update(value);}).catch(()=>undefined);
     return()=>{mounted=false;void unlisten.then(off=>off());};
-  },[onEditVideo]);
+  },[importCompleted]);
   async function refresh(){setLoading(true);setError('');try{setSources(await invoke<Source[]>('native_capture_sources'));}catch(e){setError(String(e));}finally{setLoading(false);}}
   useEffect(()=>{if(native)void refresh();},[native]);
   useEffect(()=>{if(!available.some(item=>item.id===sourceId))setSourceId(available[0]?.id||0);},[mode,sources,sourceId]);
@@ -66,8 +80,9 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
       if(!path)return;
       for(let remaining=3;remaining>0;remaining--){setCountdown(remaining);await new Promise(resolve=>setTimeout(resolve,1000));}
       editAfterRef.current=editAfter;
+      startedSession.current=null;latestStatus.current=null;
       const value=await invoke<Status>('start_native_recording',{path,options:{mode,fps,audio,originalResolution:quality,browser:null},source:{sourceId:source.id,name:source.name,crop:mode==='region'?crop:null,microphone,cursor,clicks}});
-      setStatus(current=>current?.phase==='recording'?current:value);
+      recordingStarted(value);
     }catch(e){setError(String(e));}finally{setBusy(false);setCountdown(0);}
   }
   async function control(action:string){try{await invoke('recording_control',{action});}catch(e){onNotify(String(e));}}
@@ -88,6 +103,6 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
         <p className="recording-note">开始后自动收起窗口。用 <kbd>Cmd + Alt + Shift + R</kbd> 或托盘“停止录屏并保存”结束录制。<br/>首次需授予 ScreenShot 屏幕录制权限；麦克风和点击效果需要 macOS 15 或更新版本。</p>
       </>}
     </section>
-    {(mode==='tab'||native===false)&&<BrowserRecordingPanel lockedMode={mode} onNotify={onNotify} onEditVideo={onEditVideo}/>}
+    {(mode==='tab'||native===false)&&<BrowserRecordingPanel lockedMode={mode} onNotify={onNotify} onEditVideo={onEditVideo} onRecordingStarted={recordingStarted}/>}
   </>;
 }

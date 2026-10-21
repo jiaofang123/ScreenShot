@@ -19,7 +19,7 @@ const modes: { value: RecordingMode; icon: string; label: string; description: s
 ];
 const labels: Record<string, string> = { waiting: "等待选择", selecting: "调整选区", recording: "录屏中", paused: "已暂停", saving: "保存中", saved: "已保存", cancelled: "已取消", error: "录屏出错" };
 
-export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVideo }: { onNotify: (message: string) => void; lockedMode: RecordingMode; onEditVideo: (path: string) => void }) {
+export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVideo, onRecordingStarted }: { onNotify: (message: string) => void; lockedMode: RecordingMode; onEditVideo: (path: string) => void; onRecordingStarted?: (status: RecordingStatus) => void }) {
   const [mode, setMode] = useState<RecordingMode>(lockedMode);
   const [fps, setFps] = useState(30);
   const [audio, setAudio] = useState(true);
@@ -59,6 +59,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
       const path = await save({ title: "录屏视频保存位置", defaultPath: `ScreenShot-录屏-${new Date().toLocaleString("sv-SE").replace(/[ :]/g, "-")}.mp4`, filters: [{ name: "视频", extensions: ["mp4", "webm"] }] });
       if (!path) return;
       const value = await invoke<RecordingStatus>("start_recording_session", { path, options: { mode, fps, audio, originalResolution, browser } });
+      onRecordingStarted?.(value);
       setStatus(current => current?.id === value.id ? current : value);
       onNotify(`已打开${value.browser}，请选择录制内容`);
     } catch (error) { onNotify(`无法开始录屏：${String(error)}`); }
