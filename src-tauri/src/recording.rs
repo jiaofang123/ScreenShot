@@ -43,9 +43,22 @@ pub struct RecordingOptions {
     pub mode: RecordingMode,
     pub fps: u32,
     pub audio: bool,
+    #[serde(default)]
     pub original_resolution: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<RecordingResolution>,
     #[serde(default)]
     pub browser: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RecordingResolution {
+    #[serde(rename = "1080p")]
+    FullHd,
+    #[serde(rename = "2k")]
+    Qhd,
+    #[serde(rename = "4k")]
+    Uhd,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -84,6 +97,8 @@ struct Session {
     disconnected: AtomicBool,
     connected: AtomicBool,
     shutdown: AtomicBool,
+    replacement_url: Mutex<Option<String>>,
+    browser_launch: Mutex<Option<Instant>>,
     stop_requested_at: Mutex<Option<Instant>>,
     url: String,
     sink: EventSink,
@@ -157,8 +172,10 @@ pub struct RecordingManager {
 }
 
 pub struct PreparedRecording {
+    #[allow(dead_code)] // Read by standalone test harnesses.
     pub url: String,
     pub status: RecordingStatus,
+    pub reused_controller: bool,
 }
 
 impl RecordingManager {
@@ -230,6 +247,8 @@ impl RecordingManager {
             disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(true),
             shutdown: AtomicBool::new(false),
+            replacement_url: Mutex::new(None),
+            browser_launch: Mutex::new(None),
             stop_requested_at: Mutex::new(None),
             url: String::new(),
             sink,
@@ -352,11 +371,24 @@ impl RecordingManager {
             disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
+            replacement_url: Mutex::new(None),
+            browser_launch: Mutex::new(None),
             stop_requested_at: Mutex::new(None),
             url: format!("{origin}{prefix}"),
             sink,
         });
+        let mut reused_controller = false;
         if let Some(previous) = current.replace(session.clone()) {
+            // A completed controller can navigate to a new session in its existing
+            // window, including when the project/destination has changed.
+            reused_controller = previous.connected.load(Ordering::Acquire)
+                && !previous.shutdown.load(Ordering::Acquire)
+                && !previous.url.is_empty()
+                && previous.status.lock().browser == status.browser;
+            if reused_controller {
+                *previous.replacement_url.lock() = Some(session.url.clone());
+                *session.browser_launch.lock() = Some(Instant::now());
+            }
             previous.shutdown.store(true, Ordering::Release);
         }
         drop(current);
@@ -381,6 +413,7 @@ impl RecordingManager {
         Ok(PreparedRecording {
             url: session.url.clone(),
             status,
+            reused_controller,
         })
     }
 }
@@ -594,6 +627,17 @@ fn websocket_worker(listener: TcpListener, session: Arc<Session>, origin: String
                     ) => {}
                 Err(_) => break,
             }
+        }
+        if let Some(url) = session.replacement_url.lock().as_ref() {
+            let _ = socket.send(Message::Text(
+                serde_json::json!({"controllerUrl":url}).to_string().into(),
+            ));
+        } else if session.shutdown.load(Ordering::Acquire) {
+            let _ = socket.send(Message::Text(
+                serde_json::json!({"controllerClosed":true})
+                    .to_string()
+                    .into(),
+            ));
         }
         let _ = socket.close(None);
         session.disconnected.store(true, Ordering::Release);
@@ -1573,9 +1617,12 @@ pub fn start_recording_session(
         .lock()
         .as_ref()
         .and_then(|session| session.status.lock().options.browser.clone());
-    if let Err(error) = open_browser(&prepared.url, preference.as_deref()) {
-        let _ = state.control("cancel");
-        return Err(error);
+    if !prepared.reused_controller {
+        let session = state.current.lock().clone().ok_or("没有录屏任务")?;
+        if let Err(error) = launch_controller(&session, preference.as_deref()) {
+            let _ = state.control("cancel");
+            return Err(error);
+        }
     }
     Ok(prepared.status)
 }
@@ -1596,7 +1643,17 @@ pub fn reopen_recording_browser(state: State<'_, RecordingManager>) -> Result<()
         return Err("录屏页面已打开，请切回浏览器继续选择".into());
     }
     let browser = session.status.lock().options.browser.clone();
-    open_browser(&session.url, browser.as_deref())
+    launch_controller(session, browser.as_deref())
+}
+
+fn launch_controller(session: &Session, browser: Option<&str>) -> Result<(), String> {
+    let mut launched = session.browser_launch.lock();
+    if launched.is_some_and(|time| time.elapsed() < Duration::from_secs(15)) {
+        return Err("录屏页面正在打开，请稍候".into());
+    }
+    open_browser(&session.url, browser)?;
+    *launched = Some(Instant::now());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1656,12 +1713,36 @@ mod tests {
         assert_eq!(path.parent(), Some(project.join("assets").as_path()));
     }
 
+    #[test]
+    fn recording_resolution_accepts_2k_and_legacy_options() {
+        let legacy =
+            serde_json::json!({"mode":"desktop","fps":30,"audio":false,"originalResolution":true});
+        let old: RecordingOptions = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(old.original_resolution);
+        assert!(old.resolution.is_none());
+        for (name, expected) in [
+            ("1080p", RecordingResolution::FullHd),
+            ("2k", RecordingResolution::Qhd),
+            ("4k", RecordingResolution::Uhd),
+        ] {
+            let mut value = legacy.clone();
+            value["resolution"] = name.into();
+            let options: RecordingOptions = serde_json::from_value(value).unwrap();
+            assert_eq!(options.resolution, Some(expected));
+            assert_eq!(serde_json::to_value(options).unwrap()["resolution"], name);
+        }
+        let mut invalid = legacy;
+        invalid["resolution"] = "8k".into();
+        assert!(serde_json::from_value::<RecordingOptions>(invalid).is_err());
+    }
+
     fn options(mode: RecordingMode) -> RecordingOptions {
         RecordingOptions {
             mode,
             fps: 30,
             audio: false,
             original_resolution: false,
+            resolution: None,
             browser: None,
         }
     }

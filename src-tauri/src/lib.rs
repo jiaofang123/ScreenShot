@@ -1,4 +1,5 @@
 mod annotate;
+mod app_window;
 mod capture;
 mod capture_cache;
 mod image_utils;
@@ -272,6 +273,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building ScreenShot")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                app_window::show_main_window(app);
+            }
             if let tauri::RunEvent::ExitRequested { api, .. } = event {
                 studio::remember_layout(app);
                 let manager = app.state::<RecordingManager>();

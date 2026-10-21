@@ -8,6 +8,8 @@ use std::{
 };
 use tauri::Manager;
 
+#[path = "../src/app_window.rs"]
+mod app_window;
 #[path = "../src/image_utils.rs"]
 #[allow(dead_code)]
 mod image_utils;
@@ -16,9 +18,22 @@ mod image_utils;
 mod recording;
 #[path = "../src/studio.rs"]
 #[allow(dead_code)]
-mod studio;
+mod studio_impl;
+mod studio {
+    pub use crate::studio_impl::*;
+    pub fn resource(app: &tauri::AppHandle, name: &str) -> std::path::PathBuf {
+        if name == "runtime/screenshot-recorder" {
+            if let Some(path) = std::env::var_os("SCREENSHOT_QA_HELPER") {
+                return path.into();
+            }
+        }
+        crate::studio_impl::resource(app, name)
+    }
+}
 mod capture {
-    pub fn show_main_window(_: &tauri::AppHandle) {}
+    pub fn show_main_window(app: &tauri::AppHandle) {
+        crate::app_window::show_main_window(app);
+    }
     // The live test supplies a known rectangle inside its own fixture window.
     // Overlay pointer handling is exercised by recording-region.ui.mjs.
     pub async fn select_recording_region(
@@ -59,6 +74,7 @@ fn main() {
                             fps: 30,
                             audio: true,
                             original_resolution: false,
+                            resolution: None,
                             browser: Some("chrome".into()),
                         },
                         destination,
@@ -85,7 +101,7 @@ fn main() {
                                 serde_json::from_value(value["options"].clone()).unwrap(),
                                 PathBuf::from(value["path"].as_str().unwrap()),
                                 "Hardware integration".into(), Arc::new(|_| {}), Some(app.clone()),
-                            ).map(|value| serde_json::json!({"url":value.url,"status":value.status}))
+                            ).map(|value| serde_json::json!({"url":value.url,"status":value.status,"reusedController":value.reused_controller}))
                         } else { manager
                             .start_native(
                                 app.clone(),
@@ -94,6 +110,11 @@ fn main() {
                                 PathBuf::from(value["path"].as_str().unwrap()),
                             )
                             .map(|status| serde_json::json!(status)) }
+                    } else if matches!(line.as_str(), "window-state" | "hide-main" | "reopen-main") {
+                        let window = app.get_webview_window("main").unwrap();
+                        if line == "hide-main" { let _ = window.hide(); }
+                        if line == "reopen-main" { crate::app_window::show_main_window(&app); }
+                        Ok(serde_json::json!({"visible":window.is_visible().unwrap(),"minimized":window.is_minimized().unwrap(),"focused":window.is_focused().unwrap()}))
                     } else {
                         manager
                             .control(&line)
@@ -116,6 +137,13 @@ fn main() {
             });
             Ok(())
         })
-        .run(context)
-        .expect("native capture test application");
+        .build(context)
+        .expect("native capture test application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                app_window::show_main_window(app);
+                println!("{}", serde_json::json!({"dockReopened":true}));
+            }
+        });
 }

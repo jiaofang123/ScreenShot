@@ -6,21 +6,34 @@ let config, socket, sourceStream, outputStream, recorder, cropWorker;
 let phase = 'waiting', startedAt = 0, endedAt = 0, pauseStarted = 0, pausedMs = 0, lastFlush = 0, nextSequence = 0, pendingBytes = 0;
 let uploadQueue = Promise.resolve(), uploadError = null, finishing = false, cancelled = false, stopRequested = false;
 let crop = null, drag = null, nativeCrop = null, nativeSources = [], preparing = false;
+let replacingController = false, retiredController = false;
+function resolutionLimits(options) {
+  const quality = options.resolution || (options.originalResolution ? '4k' : '1080p');
+  return quality === '4k' ? { width:3840,height:2160,bitrate:16000000 } : quality === '2k' ? { width:2560,height:1440,bitrate:12000000 } : { width:1920,height:1080,bitrate:8000000 };
+}
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
+function retireController() {
+  retiredController = true;
+  cleanup(); setPhase('cancelled');
+  $('settings').disabled = true; $('choose').disabled = true; $('cancel').hidden = true;
+  document.title = 'ScreenShot · 录屏设置已结束';
+  notice('此录屏设置已结束，请使用当前 ScreenShot 中的录屏入口。');
+  window.close();
+}
 function setPhase(value) {
   phase = value; $('phase').textContent = phases[value] || value;
   const active = ['recording', 'paused'].includes(value);
   const idle = ['waiting', 'saved', 'cancelled', 'error'].includes(value);
-  $('settings').disabled = !idle || preparing;
+  $('settings').disabled = retiredController || !idle || preparing;
   $('choose').hidden = !idle;
   $('choose').textContent = value === 'waiting' ? (usesNative() ? '开始录制' : `选择${$('mode').value === 'region' ? '屏幕并框选' : names[$('mode').value]}并开始录制`) : '继续新录制';
-  $('choose').disabled = preparing || !socket || socket.readyState !== WebSocket.OPEN || (usesNative() && (!$('target').value || ($('mode').value === 'region' && !nativeCrop)));
+  $('choose').disabled = retiredController || preparing || !socket || socket.readyState !== WebSocket.OPEN || (usesNative() && (!$('target').value || ($('mode').value === 'region' && !nativeCrop)));
   $('start').hidden = value !== 'selecting';
   $('pause').hidden = !active;
   $('pause').textContent = value === 'paused' ? '继续录制' : '暂停';
   $('stop').hidden = !active;
-  $('cancel').hidden = !['waiting', 'selecting', 'countdown'].includes(value);
+  $('cancel').hidden = retiredController || !['waiting', 'selecting', 'countdown'].includes(value);
   $('metrics').hidden = !['recording', 'paused', 'saving', 'saved'].includes(value);
 }
 function elapsed() { return startedAt ? Math.max(0, (pauseStarted || endedAt || performance.now()) - startedAt - pausedMs) : 0; }
@@ -63,6 +76,7 @@ async function stop() {
   }
 }
 async function applyControl(data, heartbeat = false) {
+  if (retiredController) return;
   if (data.status && data.status.id !== config?.status?.id) return;
   if (config?.nativeCapture && config.options.mode !== 'tab') {
     if (data.status?.id === config.status.id) syncNativeStatus(data.status);
@@ -133,7 +147,7 @@ async function startRecording() {
     const settings = track.getSettings();
     if (track.readyState !== 'live') throw new Error('共享已停止，请重新开始录屏。');
     await api('begin', { mime, width, height, hasAudio: outputStream.getAudioTracks().length > 0, sourceName: track.label, displaySurface: settings.displaySurface || null });
-    recorder = new MediaRecorder(outputStream, { mimeType: mime, videoBitsPerSecond: config.options.originalResolution ? 16000000 : 8000000, audioBitsPerSecond: 128000 });
+    recorder = new MediaRecorder(outputStream, { mimeType: mime, videoBitsPerSecond: resolutionLimits(config.options).bitrate, audioBitsPerSecond: 128000 });
     recorder.ondataavailable = ({ data }) => {
       if (!data.size) return;
       pendingBytes += data.size;
@@ -172,7 +186,7 @@ async function startRecording() {
 }
 
 function readOptions() {
-  return { mode: $('mode').value, fps: Number($('fps').value), audio: $('audio').checked, originalResolution: $('quality').value === '4k', browser: config?.options.browser || null };
+  return { mode: $('mode').value, fps: Number($('fps').value), audio: $('audio').checked, resolution:$('quality').value, originalResolution: $('quality').value === '4k', browser: config?.options.browser || null };
 }
 function usesNative() { return config?.nativeCapture && $('mode').value !== 'tab'; }
 function showSaved(path) {
@@ -253,10 +267,11 @@ $('choose').onclick = async () => {
     const wanted = readOptions();
     if (!navigator.mediaDevices?.getDisplayMedia || !window.MediaRecorder) throw new Error('当前浏览器不支持录屏，请使用新版 Chrome 或 Edge 打开此页。');
     const surface = { window: 'window', tab: 'browser', desktop: 'monitor', region: 'monitor' }[wanted.mode];
+    const limit = resolutionLimits(wanted);
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: { displaySurface: surface, frameRate: { ideal: wanted.fps, max: wanted.fps },
-        width: { ideal: wanted.originalResolution ? 3840 : 1920, max: wanted.originalResolution ? 3840 : 1920 },
-        height: { ideal: wanted.originalResolution ? 2160 : 1080, max: wanted.originalResolution ? 2160 : 1080 } },
+        width: { ideal: limit.width, max: limit.width },
+        height: { ideal: limit.height, max: limit.height } },
       audio: wanted.audio,
       selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude',
       monitorTypeSurfaces: ['window', 'tab'].includes(wanted.mode) ? 'exclude' : 'include',
@@ -346,15 +361,26 @@ try {
   $('choose').textContent = `选择${config.options.mode === 'region' ? '屏幕并框选' : names[config.options.mode]}${config.options.mode === 'region' ? '' : '并开始录制'}`;
   $('instructions').textContent = config.nativeCapture ? '标签页通过 Chrome/Edge 授权；窗口、屏幕和区域在此页选择并由本机录制。ScreenShot 工具与录屏控制页会从录制中排除。保存后可直接在此页继续。' : '选择共享内容，视频保存在工具中选择的目录。保存后可在此页切换方式或继续新录制。';
   if (!config.status || !['waiting','saved','cancelled','error'].includes(config.status.phase)) throw new Error('录屏已在其他页面开始，请使用原录屏页面。');
-  $('mode').value = config.options.mode; $('fps').value = String(config.options.fps); $('quality').value = config.options.originalResolution ? '4k' : '1080p'; $('audio').checked = config.options.audio;
+  $('mode').value = config.options.mode; $('fps').value = String(config.options.fps); $('quality').value = config.options.resolution || (config.options.originalResolution ? '4k' : '1080p'); $('audio').checked = config.options.audio;
   navigator.mediaDevices?.setCaptureHandleConfig?.({ handle: 'screenshot-recorder', permittedOrigins: ['*'] });
   await refreshNativeSources();
   socket = new WebSocket(config.webSocketUrl);
-  socket.onopen = () => { setPhase(config.status.phase); notice(''); if(config.status.phase === 'saved') showSaved(config.status.filePath); };
-  socket.onmessage = ({ data }) => { void applyControl(JSON.parse(data), true).catch(reportError); };
+  socket.onopen = () => { window.focus(); setPhase(config.status.phase); notice(''); if(config.status.phase === 'saved') showSaved(config.status.filePath); };
+  socket.onmessage = ({ data }) => {
+    const value = JSON.parse(data);
+    if (value.controllerUrl) {
+      replacingController = true;
+      cleanup(); setPhase('cancelled');
+      location.replace(value.controllerUrl);
+      return;
+    }
+    if (value.controllerClosed) { retireController(); return; }
+    void applyControl(value, true).catch(reportError);
+  };
   socket.onerror = () => { notice('无法连接 ScreenShot，请确认应用仍在运行。'); };
   socket.onclose = () => {
-    if (['saved', 'cancelled', 'error'].includes(phase)) return;
+    if (replacingController) return;
+    if (['saved', 'cancelled', 'error'].includes(phase)) { retireController(); return; }
     cancelled = true; uploadError ||= new Error('ScreenShot 连接已断开，已写入的片段会尽可能保留。');
     if (recorder?.state && recorder.state !== 'inactive') recorder.stop();
     else { cleanup(); setPhase('error'); notice(uploadError.message); }

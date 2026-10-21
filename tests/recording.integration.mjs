@@ -30,17 +30,17 @@ async function session(mode, suffix = mode, overrides = {}, format = 'mp4') {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
   page.on('dialog', dialog => { void dialog.accept(); });
-  await page.addInitScript(({ mode }) => {
+  await page.addInitScript(({ mode, large }) => {
     window.testSurface = { window: 'window', tab: 'browser', desktop: 'monitor', region: 'monitor' }[mode];
     window.captureCalls = [];
     navigator.mediaDevices.getDisplayMedia = async constraints => {
       window.captureCalls.push(constraints);
       if (window.denyCapture) throw new DOMException('Test cancellation', 'NotAllowedError');
-      const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+      const canvas = document.createElement('canvas'); canvas.width = large ? 2560 : 640; canvas.height = large ? 1440 : 360;
       const context = canvas.getContext('2d'); let frame = 0;
       function paint() {
-        context.fillStyle = '#19b34a'; context.fillRect(0, 0, 320, 360);
-        context.fillStyle = '#1645d1'; context.fillRect(320, 0, 320, 360);
+        context.fillStyle = '#19b34a'; context.fillRect(0, 0, canvas.width/2, canvas.height);
+        context.fillStyle = '#1645d1'; context.fillRect(canvas.width/2, 0, canvas.width/2, canvas.height);
         context.fillStyle = '#fff'; context.fillRect(8 + frame++ % 30, 8, 20, 20);
       }
       paint(); const timer = setInterval(paint, 50);
@@ -58,7 +58,7 @@ async function session(mode, suffix = mode, overrides = {}, format = 'mp4') {
       window.sourceStream = stream;
       return stream;
     };
-  }, { mode });
+  }, { mode, large:overrides.resolution === '2k' });
   await page.goto(info.url);
   await page.getByRole('button', { name: /^选择/, exact: false }).waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.getElementById('choose').disabled);
@@ -98,12 +98,13 @@ async function videoInfo(page, path, audio = false) {
 
 const results = [];
 try {
-  for (const { mode, audio = false, suffix = mode, format = 'mp4' } of [
+  for (const { mode, audio = false, suffix = mode, format = 'mp4', resolution } of [
     { mode: 'window' }, { mode: 'tab' }, { mode: 'desktop' }, { mode: 'region' },
     { mode: 'tab', audio: true, suffix: 'tab-audio' },
     { mode: 'desktop', suffix: 'desktop-webm', format: 'webm' },
+    { mode: 'tab', suffix: 'tab-2k', resolution:'2k' },
   ]) {
-    const current = await session(mode, suffix, { audio }, format);
+    const current = await session(mode, suffix, { audio, ...(resolution?{resolution}:{}) }, format);
     const { child, page, info, errors } = current;
     try {
       if (mode === 'window') {
@@ -151,13 +152,18 @@ try {
         assert.ok(metadata.height >= 214 && metadata.height <= 218, JSON.stringify(metadata));
         assert.ok(metadata.left[1] > 100 && metadata.right[1] > 100, 'Crop should contain only the green portion of the shared screen');
       } else {
-        assert.equal(metadata.width, 640); assert.equal(metadata.height, 360);
+        assert.equal(metadata.width, resolution==='2k'?2560:640); assert.equal(metadata.height, resolution==='2k'?1440:360);
         assert.ok(metadata.left[1] > 100 && metadata.right[2] > 100);
       }
       const saved = await fetch(new URL('config', info.url)).then(response => response.json());
       assert.equal(saved.status.phase, 'saved'); assert.equal(saved.status.filePath, path);
       assert.equal(saved.status.bytesWritten, (await stat(path)).size);
       assert.equal(saved.status.hasAudio, audio);
+      if(resolution==='2k') {
+        const constraints=await page.evaluate(()=>window.captureCalls.at(-1));
+        assert.equal(constraints.video.width.max,2560);assert.equal(constraints.video.height.max,1440);
+        assert.equal(saved.status.options.resolution,'2k');
+      }
       assert.ok(saved.status.elapsedMs >= 1000);
       assert.deepEqual(errors, []);
       results.push({ mode, audio, path, ...metadata, bytes: saved.status.bytesWritten });

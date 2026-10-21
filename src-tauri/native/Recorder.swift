@@ -14,6 +14,7 @@ func emit(_ value: [String: Any]) {
 struct Options: Decodable {
     var mode: String; var sourceId: UInt32; var fps: Int; var audio: Bool
     var microphone: Bool?; var cursor: Bool?; var clicks: Bool?; var originalResolution: Bool
+    var resolution: String?
     var crop: Crop?
     var excludedProcessIDs: [Int32]?
     struct Crop: Decodable { var x: Double; var y: Double; var width: Double; var height: Double }
@@ -158,7 +159,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 config.sourceRect = region; sourceSize = region.size
             } else { sourceSize = display.frame.size }
         }
-        let limit = options.originalResolution ? CGSize(width:3840,height:2160) : CGSize(width:1920,height:1080)
+        let resolution = options.resolution ?? (options.originalResolution ? "4k" : "1080p")
+        let limit = resolution == "4k" ? CGSize(width:3840,height:2160) : resolution == "2k" ? CGSize(width:2560,height:1440) : CGSize(width:1920,height:1080)
         let ratio = min(scale, limit.width / sourceSize.width, limit.height / sourceSize.height)
         config.width = max(2, Int(sourceSize.width * ratio) / 2 * 2)
         config.height = max(2, Int(sourceSize.height * ratio) / 2 * 2)
@@ -173,7 +175,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         writer = try AVAssetWriter(outputURL: URL(fileURLWithPath:path), fileType:.mp4)
         writer.shouldOptimizeForNetworkUse = true
         video = AVAssetWriterInput(mediaType:.video, outputSettings:[AVVideoCodecKey:AVVideoCodecType.h264, AVVideoWidthKey:config.width, AVVideoHeightKey:config.height,
-            AVVideoCompressionPropertiesKey:[AVVideoAverageBitRateKey:options.originalResolution ? 16000000 : 8000000, AVVideoExpectedSourceFrameRateKey:options.fps]])
+            AVVideoCompressionPropertiesKey:[AVVideoAverageBitRateKey:resolution == "4k" ? 16000000 : resolution == "2k" ? 12000000 : 8000000, AVVideoExpectedSourceFrameRateKey:options.fps]])
         video.expectsMediaDataInRealTime = true; writer.add(video)
         func audioInput() -> AVAssetWriterInput {
             let input = AVAssetWriterInput(mediaType:.audio, outputSettings:[AVFormatIDKey:kAudioFormatMPEG4AAC, AVSampleRateKey:48000, AVNumberOfChannelsKey:2, AVEncoderBitRateKey:128000])
@@ -198,6 +200,22 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             try await audioStream.startCapture()
         }
         emit(["event":"started", "width":config.width, "height":config.height, "hasAudio":options.audio || options.microphone == true])
+#if SCREENSHOT_TESTING
+        // Hardware regression injects the OS delegate event after capturing real
+        // frames. This hook is absent from shipped builds.
+        if let flag = ProcessInfo.processInfo.environment["SCREENSHOT_QA_SYSTEM_STOP_FILE"] {
+            Task {
+                while true {
+                    try await Task.sleep(nanoseconds:100_000_000)
+                    if FileManager.default.fileExists(atPath:flag) {
+                        try? FileManager.default.removeItem(atPath:flag)
+                        self.stream(stream, didStopWithError:NSError(domain:"ScreenShotQA",code:1,userInfo:[NSLocalizedDescriptionKey:"System stop callback regression"]))
+                        return
+                    }
+                }
+            }
+        }
+#endif
     }
     func control(_ action: String) {
         queue.async {

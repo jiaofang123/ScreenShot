@@ -114,13 +114,20 @@ try {
   await page.evaluate(()=>{window.failStart=false;window.statusEvent({...window.recordStatus,phase:'cancelled',filePath:null});});
   // Standalone native recording uses a daily default, without auto-importing.
   await page.getByRole('button',{name:'录屏',exact:true}).click();
+  await page.getByRole('combobox',{name:'录屏画质',exact:true}).selectOption('2k');
   await page.getByRole('button',{name:'开始录屏',exact:true}).click();
   await page.getByText('本次录屏已开始',{exact:true}).waitFor({timeout:10000});
   const native=await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_native_recording'));
+  assert.equal(native.args.options.resolution,'2k');
   assert.match(native.args.path,/^\/Users\/test\/screenshot\/\d{4}-\d{2}-\d{2}\/current.mp4$/);
   await page.getByRole('button',{name:'停止并保存',exact:true}).click();await settle();
   assert.equal(await page.locator('.mode-tabs button.selected').innerText(),'录屏');
   assert.equal((await importedPaths()).length,3);
+  // The compatibility/tab entry carries the same 2K choice through IPC.
+  await page.getByRole('radio',{name:/浏览器页签/}).check();
+  await page.getByRole('combobox',{name:'录屏画质',exact:true}).selectOption('2k');
+  await page.getByRole('button',{name:'开始录屏',exact:true}).click();await settle();
+  assert.equal(await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_recording_session').args.options.resolution),'2k');
   assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.cmd==='plugin:dialog|save').length),0);
   assert.deepEqual(errors, []);
   console.log('PASS: studio opens controller directly, fullscreen retained, no save dialog, project/daily paths, stale/deleted protection, failed/cancelled start, fast completion, continuation ownership, single import');

@@ -1044,13 +1044,7 @@ fn deliver_image(app: &AppHandle, image: RgbaImage, capture_kind: &str) -> Resul
 }
 
 pub(crate) fn show_main_window(app: &AppHandle) {
-    #[cfg(target_os = "macos")]
-    let _ = app.show();
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
+    crate::app_window::show_main_window(app);
 }
 
 #[cfg(target_os = "macos")]

@@ -34,6 +34,7 @@ const browser=await (process.env.TEST_BROWSER==='webkit'?webkit:chromium).launch
 page=await browser.newPage();page.setDefaultTimeout(5000);page.on('pageerror',error=>errors.push(error.message));
 await page.addInitScript(()=>{
   window.browserCaptureCalls=0;
+  window.closedControllers=0;window.close=()=>window.closedControllers++;
   navigator.mediaDevices.getDisplayMedia=async()=>{window.browserCaptureCalls++;throw new Error('Native modes must not use browser desktop capture');};
   window.WebSocket=class {
     static OPEN=1;readyState=1;
@@ -44,6 +45,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(()=>!document.getElementById('choose').disabled);
   for(const mode of ['window','desktop','region','window']) {
+    await page.locator('#quality').selectOption('2k');
     await page.locator('#mode').selectOption(mode);
     await page.waitForFunction(mode=>document.getElementById('target').value===(mode==='window'?'10':'20'),mode);
     if(mode==='region') {
@@ -58,6 +60,7 @@ try {
     assert.equal(await page.locator('#mode').isDisabled(),true);
     assert.equal(await page.evaluate(()=>window.browserCaptureCalls),0);
     const begin=requests.filter(item=>item.route==='native-begin').at(-1);
+    assert.equal(status.options.resolution,'2k');
     assert.equal(begin.data.sourceId,mode==='window'?10:20);
     assert.deepEqual(begin.data.crop,mode==='region'?{x:.1,y:.2,width:.5,height:.4}:null);
     await page.locator('#pause').click();await page.getByText('已暂停',{exact:true}).waitFor();
@@ -68,6 +71,12 @@ try {
   }
   await page.locator('#mode').selectOption('tab');
   await page.waitForFunction(()=>document.getElementById('native-target').hidden);
+  await page.evaluate(()=>window.nativeEvent({controllerClosed:true}));
+  assert.equal(await page.evaluate(()=>window.closedControllers),1);
+  assert.equal(await page.locator('#choose').isDisabled(),true);
+  assert.equal(await page.locator('#settings').evaluate(fieldset=>fieldset.disabled),true);
+  assert.equal(await page.locator('#quality').isDisabled(),true);
+  assert.equal(await page.title(),'ScreenShot · 录屏设置已结束');
   assert.deepEqual(errors,[]);
   console.log('PASS: Chrome controller native window/desktop/region, region cancellation, range handoff, pause/resume/save, repeated rounds, tab switching');
 } finally { await browser.close();server.close(); }

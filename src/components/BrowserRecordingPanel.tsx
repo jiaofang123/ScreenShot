@@ -8,7 +8,7 @@ interface RecordingStatus {
   id: string; controllerId?: string; mode: RecordingMode; phase: string; message: string; elapsedMs: number;
   bytesWritten: number; filePath: string | null; browser: string; sourceName: string;
   width: number; height: number; hasAudio: boolean;
-  options?: { fps: number; audio: boolean; originalResolution: boolean; browser: string | null };
+  options?: { fps: number; audio: boolean; originalResolution: boolean; resolution?: string; browser: string | null };
   stopShortcutAvailable?: boolean;
 }
 const modes: { value: RecordingMode; icon: string; label: string; description: string }[] = [
@@ -23,7 +23,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
   const [mode, setMode] = useState<RecordingMode>(lockedMode);
   const [fps, setFps] = useState(30);
   const [audio, setAudio] = useState(true);
-  const [originalResolution, setOriginalResolution] = useState(false);
+  const [resolution, setResolution] = useState("1080p");
   const [browser, setBrowser] = useState("auto");
   const [browsers, setBrowsers] = useState<{ id: string; name: string }[]>([]);
   const [status, setStatus] = useState<RecordingStatus | null>(null);
@@ -38,7 +38,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
       setMode(value.mode);
       if (value.options) {
         setFps(value.options.fps); setAudio(value.options.audio);
-        setOriginalResolution(value.options.originalResolution); setBrowser(value.options.browser || "auto");
+        setResolution(value.options.resolution || (value.options.originalResolution ? "4k" : "1080p")); setBrowser(value.options.browser || "auto");
       }
     }
   }
@@ -60,7 +60,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
     try {
       const path = await recordingPath();
       controller.current=null;onRecordingPreparing?.();
-      const value = await invoke<RecordingStatus>("start_recording_session", { path, options: { mode, fps, audio, originalResolution, browser } });
+      const value = await invoke<RecordingStatus>("start_recording_session", { path, options: { mode, fps, audio, resolution, originalResolution:resolution === "4k", browser } });
       controller.current=value.controllerId||value.id;
       onRecordingStarted?.(value);
       setStatus(current => current?.id === value.id ? current : value);
@@ -89,7 +89,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
       <div className="recording-options">
         <label>浏览器 <select aria-label="录屏浏览器" value={browser} disabled={active || busy} onChange={event => setBrowser(event.target.value)}><option value="auto">自动选择</option>{browsers.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}<option value="system">系统默认浏览器</option></select></label>
         <label>帧率 <select aria-label="录屏帧率" value={fps} disabled={active || busy} onChange={event => setFps(Number(event.target.value))}><option value={15}>15 fps</option><option value={30}>30 fps</option><option value={60}>60 fps</option></select></label>
-        <label>画质 <select aria-label="录屏画质" value={originalResolution ? "4k" : "1080p"} disabled={active || busy} onChange={event => setOriginalResolution(event.target.value === "4k")}><option value="1080p">最高 1080p</option><option value="4k">最高 4K</option></select></label>
+        <label>画质 <select aria-label="录屏画质" value={resolution} disabled={active || busy} onChange={event => setResolution(event.target.value)}><option value="1080p">最高 1080p</option><option value="2k">最高 2K（2560 × 1440）</option><option value="4k">最高 4K</option></select></label>
         <label className="recording-audio"><input type="checkbox" checked={audio} disabled={active || busy} onChange={event => setAudio(event.target.checked)} />录制共享声音</label>
       </div>
       <div className="recording-actions">

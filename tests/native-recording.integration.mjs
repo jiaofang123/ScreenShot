@@ -2,7 +2,7 @@
 // desktop/region clips with that fixture covering the display. No fake media.
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, stat } from 'node:fs/promises';
+import { mkdtemp, mkdir, copyFile, readFile, writeFile, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { tmpdir, homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -13,6 +13,9 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const helper=process.env.SCREENSHOT_NATIVE_HELPER||join(root,'src-tauri/resources/runtime/screenshot-recorder');
 const ffmpeg=join(root,'src-tauri/studio/node_modules/ffmpeg-static/ffmpeg');
 const directory=await mkdtemp(join(tmpdir(),'ScreenShot-real-acceptance-'));
+const testingHelper=join(directory,'screenshot-recorder-qa'),systemStopFile=join(directory,'system-stop.flag');
+execFileSync('/usr/bin/xcrun',['swiftc','-O','-D','SCREENSHOT_TESTING','-target',`${process.arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,join(root,'src-tauri/native/Recorder.swift'),'-o',testingHelper],{stdio:'pipe'});
+execFileSync('/usr/bin/codesign',['--force','--sign','-',testingHelper],{stdio:'pipe'});
 const title=`NativeCapture-QA-${Date.now()}`;
 const date=new Date(),day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
 const workerPath=process.env.STUDIO_WORKER||join(root,'src-tauri/studio/worker.mjs');
@@ -22,7 +25,7 @@ function mediaCall(method,payload={}) {
 }
 const project=mediaCall('project:create',{name:'录屏路径真机验收'});
 const browser=await chromium.launch({headless:false,executablePath:process.env.RECORDING_CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--window-position=0,25','--window-size=1700,1050',`--auto-select-tab-capture-source-by-title=${title}`]});
-let child, lines, stderr='';const results=[],responses=[];
+let child, lines, stderr='',dockReopens=0;const results=[],responses=[];
 const context=await browser.newContext({viewport:null});
 const fixture=await context.newPage();
 async function command(value){
@@ -54,10 +57,17 @@ async function inspect(path){
 try{
   await fixture.setContent(`<title>${title}</title><style>html,body{margin:0;height:100%;background:linear-gradient(to right,#10b040 50%,#1545d0 50%);color:white;font:32px sans-serif}div{padding:100px}</style><div>Native capture verification</div><script>setInterval(()=>document.querySelector('div').textContent='Native capture verification '+Date.now(),50)</script>`);
   await fixture.bringToFront();await fixture.waitForTimeout(500);
-  child=spawn(process.env.SCREENSHOT_NATIVE_HARNESS||join(root,'src-tauri/target/debug/examples/native_recording_harness'),[join(directory,'controller.mp4')],{stdio:['pipe','pipe','pipe'],env:{...process.env,SCREENSHOT_REAL_CAPTURE:'1'}});
+  // Register a separate owned app bundle so `open` exercises a real macOS Dock
+  // reopen event without interacting with the user's installed ScreenShot.
+  const probeApp=join(directory,'ScreenShot Dock QA.app'),macos=join(probeApp,'Contents','MacOS');
+  await mkdir(macos,{recursive:true});
+  await copyFile(process.env.SCREENSHOT_NATIVE_HARNESS||join(root,'src-tauri/target/debug/examples/native_recording_harness'),join(macos,'native_recording_harness'));
+  await writeFile(join(probeApp,'Contents','Info.plist'),`<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>com.screenshot.qa.dock.${Date.now()}</string><key>CFBundleExecutable</key><string>native_recording_harness</string><key>CFBundleName</key><string>ScreenShot Dock QA</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`);
+  execFileSync('/usr/bin/codesign',['--force','--sign','-',probeApp],{stdio:'pipe'});
+  child=spawn(join(macos,'native_recording_harness'),[join(directory,'controller.mp4')],{stdio:['pipe','pipe','pipe'],env:{...process.env,SCREENSHOT_REAL_CAPTURE:'1',SCREENSHOT_QA_HELPER:testingHelper,SCREENSHOT_QA_SYSTEM_STOP_FILE:systemStopFile}});
   child.stderr.on('data',bytes=>stderr+=bytes);
   lines=createInterface({input:child.stdout});let first;
-  const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Harness startup timed out: '+stderr)),20000);lines.on('line',line=>{try{const value=JSON.parse(line);if(value.url&&!first){first=value;clearTimeout(timer);resolve(value);}else responses.push(value);}catch{}});child.once('exit',code=>{if(!first){clearTimeout(timer);reject(Error('Harness exited '+code+': '+stderr));}});});
+  const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Harness startup timed out: '+stderr)),20000);lines.on('line',line=>{try{const value=JSON.parse(line);if(value.dockReopened){dockReopens++;return;}if(value.url&&!first){first=value;clearTimeout(timer);resolve(value);}else responses.push(value);}catch{}});child.once('exit',code=>{if(!first){clearTimeout(timer);reject(Error('Harness exited '+code+': '+stderr));}});});
   const initial=await ready;
   await command('cancel');await waitStatus(initial.url,'cancelled');
   const destination=await command({destination:{projectRoot:project.rootDir,date:day}});
@@ -72,6 +82,7 @@ try{
   await page.waitForFunction(()=>!document.getElementById('choose').disabled);
   // Live window creation/recording/control/save through the production HTTP bridge.
   for(const mode of ['window','desktop','region','tab','window']){
+    await page.locator('#quality').selectOption(mode==='region'?'4k':mode==='window'&&!results.length?'1080p':'2k');
     await page.locator('#mode').selectOption(mode);
     if(mode==='window'){
       assert.equal(await page.locator('#target option').evaluateAll(options=>options.some(option=>option.textContent.includes('ScreenShot QA Exclusion'))),false);
@@ -88,12 +99,36 @@ try{
     await page.locator('#stop').click();const saved=await waitStatus(url,'saved');
     await page.getByRole('heading',{name:'视频已保存',exact:true}).waitFor();
     const result=await inspect(saved.filePath);
+    assert.ok(result.width<=(mode==='region'?3840:mode==='window'&&!results.length?1920:2560));
+    assert.ok(result.height<=(mode==='region'?2160:mode==='window'&&!results.length?1080:1440));
+    if(mode==='desktop')assert.equal(result.height,1440,'2K desktop must encode above 1080p');
     assert.equal(dirname(saved.filePath),join(project.rootDir,'assets'));
     if(mode!=='tab')assert.equal(result.audio,true);
     assert.equal(result.audio,saved.hasAudio);
     assert.ok(!results.some(previous=>previous.path===result.path));results.push({mode,...result});
     console.log('PASS real capture:',mode,result.width,result.height,result.duration);
   }
+  // Starting again from the tool replaces the session/project but keeps its page.
+  const existingBytes=await readFile(results.at(-1).path),pageCount=context.pages().length,oldController=(await config(url)).status.controllerId;
+  const replacement=await command({prepare:true,path:join(directory,'replacement.mp4'),options:{mode:'window',fps:30,audio:false,resolution:'2k',originalResolution:false,browser:'chrome'}});
+  assert.equal(replacement.ok,true,JSON.stringify(replacement));assert.equal(replacement.status.reusedController,true);
+  const nextUrl=replacement.status.url;
+  await page.waitForURL(nextUrl);await page.waitForFunction(()=>!document.getElementById('choose').disabled);
+  assert.equal(context.pages().length,pageCount);assert.equal(await page.locator('#quality').inputValue(),'2k');
+  assert.notEqual((await config(nextUrl)).status.controllerId,oldController);
+  assert.deepEqual(await readFile(results.at(-1).path),existingBytes);
+  // Inject the system's stop delegate into a test-only build after real desktop
+  // frames/audio arrive; this does not pretend to click the macOS toolbar.
+  await page.locator('#mode').selectOption('desktop');await page.locator('#audio').check();
+  await page.locator('#choose').click();await waitStatus(nextUrl,'recording');await page.waitForTimeout(1300);
+  assert.equal((await command('window-state')).status.visible,false);
+  await writeFile(systemStopFile,'stop');const ended=await waitStatus(nextUrl,'saved');results.push({mode:'system-stop-callback',...await inspect(ended.filePath)});
+  // A hidden app must receive applicationShouldHandleReopen and restore/focus.
+  assert.equal((await command('hide-main')).status.visible,false);
+  execFileSync('/usr/bin/open',[probeApp]);
+  const reopenDeadline=Date.now()+10000;while(!dockReopens&&Date.now()<reopenDeadline)await new Promise(resolve=>setTimeout(resolve,50));
+  assert.equal(dockReopens,1,'macOS did not deliver Dock reopen');
+  const restored=(await command('window-state')).status;assert.equal(restored.visible,true);assert.equal(restored.minimized,false);assert.equal(restored.focused,true);
   // The main tool's command calls the same manager, not the browser controller.
   const sources=JSON.parse(execFileSync(helper,['list'],{encoding:'utf8'})).sources;
   const target=sources.find(source=>source.kind==='window'&&source.name.includes(title));assert.ok(target);
@@ -101,6 +136,7 @@ try{
   child.stdin.write(JSON.stringify({options:{mode:'window',fps:30,audio:false,originalResolution:false},source:{sourceId:4294967295},path:join(directory,'invalid.mp4')})+'\n');
   while(responses.length===invalidBefore){await new Promise(resolve=>setTimeout(resolve,50));}
   assert.equal(responses.at(-1).ok,false);assert.match(responses.at(-1).error,/窗口已关闭/);
+  assert.equal(page.isClosed(),true,'Superseded control window should close');
   assert.equal(await stat(join(directory,'invalid.mp4')).then(()=>true,()=>false),false);
   const daily=await command({destination:{projectRoot:null,date:day}});assert.equal(daily.ok,true,JSON.stringify(daily));
   const directPath=daily.status.path;assert.equal(dirname(directPath),join(homedir(),'screenshot',day));
@@ -117,7 +153,7 @@ try{
   execFileSync(helper,['snapshot',String(display.id),snapshot,String(child.pid)]);
   const png=await readFile(snapshot);assert.equal(png.readUInt32BE(16),display.width);assert.equal(png.readUInt32BE(20),display.height);
   assert.deepEqual(pageErrors,[]);
-  const report={result:'PASS',directory,projectRoot:project.rootDir,results,snapshot:{width:display.width,height:display.height}};
+  const report={result:'PASS',directory,projectRoot:project.rootDir,results,dockReopens,controllerReused:true,snapshot:{width:display.width,height:display.height}};
   await writeFile(join(directory,'results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 }catch(error){console.error('Native hardware test failed:',error,'\n',stderr);throw error;}
 finally{
