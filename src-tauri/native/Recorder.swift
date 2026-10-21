@@ -1,5 +1,6 @@
 // ScreenShot macOS capture helper. Uses ScreenCaptureKit directly, never a browser.
 import Foundation
+import AppKit
 import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
@@ -31,7 +32,12 @@ func isToolApplication(_ application: SCRunningApplication?, excluding processes
 }
 
 @available(macOS 13.0, *)
-func desktopFilter(_ display: SCDisplay, content: SCShareableContent, excluding processes: [Int32]) -> SCContentFilter {
+@MainActor func displayScale(_ display: SCDisplay) -> CGFloat {
+    NSScreen.screens.first(where: { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == display.displayID })?.backingScaleFactor ?? 1
+}
+
+@available(macOS 13.0, *)
+@MainActor func desktopFilter(_ display: SCDisplay, content: SCShareableContent, excluding processes: [Int32]) -> SCContentFilter {
     let own = content.applications.filter { isToolApplication($0, excluding: processes) }
     // Exceptions invert the application rule. Include only controller windows
     // belonging to other applications, so no tool window is accidentally restored.
@@ -51,10 +57,10 @@ final class DesktopSnapshot: NSObject, SCStreamOutput, @unchecked Sendable {
               let reply = continuation else { return }
         continuation = nil; reply.resume(returning: pixels)
     }
-    func capture(_ displayID: UInt32, path: String, excluding processes: [Int32]) async throws {
+    @MainActor func capture(_ displayID: UInt32, path: String, excluding processes: [Int32]) async throws {
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else { throw NSError(domain:"ScreenShot",code:2,userInfo:[NSLocalizedDescriptionKey:"屏幕不可用，请重新选择"]) }
-        let config = SCStreamConfiguration(); config.width = display.width; config.height = display.height; config.showsCursor = false
+        let config = SCStreamConfiguration(); config.width = Int(display.frame.width * displayScale(display)); config.height = Int(display.frame.height * displayScale(display)); config.showsCursor = false
         let stream = SCStream(filter:desktopFilter(display,content:content,excluding:processes),configuration:config,delegate:nil)
         try stream.addStreamOutput(self,type:.screen,sampleHandlerQueue:DispatchQueue(label:"ScreenShot.snapshot"))
         let pixels: CVPixelBuffer = try await withCheckedThrowingContinuation { reply in
@@ -120,7 +126,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         }
     }
 
-    func prepare(_ options: Options, path: String) async throws {
+    @MainActor func prepare(_ options: Options, path: String) async throws {
         if options.microphone == true, !(await AVCaptureDevice.requestAccess(for:.audio)) { throw NSError(domain:"ScreenShot",code:6,userInfo:[NSLocalizedDescriptionKey:"麦克风未授权，请在系统设置中允许 ScreenShot 使用麦克风"]) }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         let config = SCStreamConfiguration()
@@ -133,7 +139,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
             guard !isToolApplication(window.owningApplication,excluding:options.excludedProcessIDs ?? []), !isRecorderController(window.title) else { throw NSError(domain:"ScreenShot",code:9,userInfo:[NSLocalizedDescriptionKey:"不能录制 ScreenShot 工具或录屏控制页，请选择其他窗口"]) }
             filter = SCContentFilter(desktopIndependentWindow: window)
             sourceSize = window.frame.size
-            scale = 2
+            if #available(macOS 14.0, *) { scale = CGFloat(filter.pointPixelScale) }
+            else { scale = NSScreen.screens.first(where: { $0.frame.intersects(window.frame) })?.backingScaleFactor ?? 1 }
         } else {
             guard let display = content.displays.first(where: { $0.displayID == options.sourceId }) else { throw NSError(domain:"ScreenShot", code:2, userInfo:[NSLocalizedDescriptionKey:"屏幕不可用，请重新选择"] ) }
             filter = desktopFilter(display,content:content,excluding:options.excludedProcessIDs ?? [])
@@ -144,7 +151,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
                 let own = content.applications.filter { isToolApplication($0,excluding:options.excludedProcessIDs ?? []) }
                 systemAudioFilter = SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
             }
-            scale = CGFloat(display.width) / max(1, display.frame.width)
+            scale = displayScale(display)
             if let crop = options.crop, options.mode == "region" {
                 let region = CGRect(x: crop.x * display.frame.width, y: crop.y * display.frame.height, width: crop.width * display.frame.width, height: crop.height * display.frame.height)
                 guard region.width * scale >= 8, region.height * scale >= 8, CGRect(origin:.zero, size:display.frame.size).contains(region) else { throw NSError(domain:"ScreenShot", code:3, userInfo:[NSLocalizedDescriptionKey:"录制区域无效"] ) }
@@ -220,7 +227,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
 }
 
 @available(macOS 13.0, *)
-func run() async {
+@MainActor func run() async {
     do {
         if CommandLine.arguments.count > 4, CommandLine.arguments[1] == "snapshot" {
             try await DesktopSnapshot().capture(UInt32(CommandLine.arguments[2])!,path:CommandLine.arguments[3],excluding:[Int32(CommandLine.arguments[4])!]);return
@@ -258,7 +265,7 @@ func run() async {
         }
         if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "list" {
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly:true)
-            var sources: [[String:Any]] = content.displays.map { ["id":$0.displayID,"kind":"desktop","name":"屏幕 \($0.displayID)","width":$0.width,"height":$0.height] }
+            var sources: [[String:Any]] = content.displays.map { ["id":$0.displayID,"kind":"desktop","name":"屏幕 \($0.displayID)","width":Int($0.frame.width * displayScale($0)),"height":Int($0.frame.height * displayScale($0))] }
             let excluded = CommandLine.arguments.count > 2 ? [Int32(CommandLine.arguments[2]) ?? 0] : []
             sources += content.windows.filter { !isToolApplication($0.owningApplication,excluding:excluded) && !isRecorderController($0.title) && $0.frame.width > 80 && $0.frame.height > 60 && !($0.title ?? "").isEmpty }.map {
                 ["id":$0.windowID,"kind":"window","name":"\($0.owningApplication?.applicationName ?? "应用") · \($0.title ?? "窗口")","width":Int($0.frame.width),"height":Int($0.frame.height)]
@@ -276,5 +283,9 @@ func run() async {
     } catch { emit(["event":"error", "message":error.localizedDescription]); exit(1) }
 }
 
-Task { if #available(macOS 13.0, *) { await run(); exit(0) } else { emit(["event":"error","message":"原生录屏需要 macOS 13 或更新版本"]); exit(1) } }
+// Window filters call WindowServer APIs that require an initialized AppKit
+// connection. A headless Swift command-line process has no connection by default.
+let application = NSApplication.shared
+application.setActivationPolicy(.accessory)
+Task { @MainActor in if #available(macOS 13.0, *) { await run(); exit(0) } else { emit(["event":"error","message":"原生录屏需要 macOS 13 或更新版本"]); exit(1) } }
 dispatchMain()

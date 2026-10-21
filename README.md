@@ -138,7 +138,18 @@ macOS 原生编码器提供不访问屏幕/麦克风的自检：
 src-tauri/resources/runtime/screenshot-recorder self-test /tmp/native-recorder-test.mp4
 ```
 
-自动化覆盖合成媒体、模拟窗口 IPC 和真实编码器，系统共享权限、实际屏幕采集及 Windows 实机仍需人工验证。
+以上测试覆盖合成媒体、模拟窗口 IPC 和真实编码器；实际屏幕采集另用下面的真机验收，系统首次权限和 Windows 仍需人工确认。
+
+macOS 真机录屏验收（会打开独立 Chrome 测试窗口，并实际录制该窗口、屏幕和区域；请先授权屏幕录制）：
+
+```sh
+cd src-tauri
+cargo build --locked --example native_recording_harness
+cd ..
+SCREENSHOT_REAL_CAPTURE=1 node tests/native-recording.integration.mjs
+```
+
+该验收使用正式录屏管理器、本机采集组件及 Chrome 控制页，实际采集窗口、桌面、区域和浏览器标签页，验证开始、暂停/继续、停止保存、连续切换录制方式、无效窗口报错、工具与控制窗口排除、Retina 框选图尺寸，并解码保存的真实视频和音轨检查画面。区域交互在此测试中使用固定范围，鼠标框选另由 `recording-region.ui.mjs` 验证。测试结束打印视频和 `results.json` 的本机目录，与使用合成媒体的测试独立运行。
 
 ## Windows 打包
 

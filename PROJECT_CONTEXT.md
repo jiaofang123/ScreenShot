@@ -115,6 +115,13 @@ ScreenShot 是一个 Windows + macOS 桌面截图与录屏工具。用户按全�
 
 ## 8. 当前状态
 
+- 2026-10-21 修复原生录屏启动即退出，并完成真机验收：
+  - 用户点击开始后提示“原生录屏进程已结束”。本机崩溃报告显示，独立 Swift 进程未初始化 AppKit/WindowServer 连接，在后台创建 ScreenCaptureKit 窗口过滤器时触发断言退出。现在先在主线程初始化 `NSApplication`，采集及过滤器初始化在 `MainActor` 执行。
+  - 启动命令改为异步后台等待原生组件真实返回 `started`；失败返回具体错误、进程退出状态及有限长度的诊断信息，避免界面先显示启动成功。保留 15 秒启动超时与异常文件恢复。
+  - 真机验收同时发现 Retina 框选快照尺寸与来源元数据不一致；现在显示器和窗口按实际 backing scale / `pointPixelScale` 设置像素尺寸，桌面快照与框选来源一致。
+  - 新增显式启用的 `native_recording_harness` 及 `tests/native-recording.integration.mjs`，使用正式管理器和本机组件、真实 Chrome 标签页采集，完成窗口→桌面→区域→标签页→窗口五段连续录制，以及主工具命令直接录制、无效窗口错误、暂停/继续/停止保存。6 段真实视频和 AAC / Opus 音轨均完整解码通过，画面像素验证了工具测试窗口和独立控制窗口的排除；Retina 框选快照为 3584×2240。区域采集使用固定测试范围，指针操作由已有框选 UI 回归覆盖。
+  - 19 项 Rust 测试、前端构建、macOS Release 构建及签名校验通过。已更新 `/Applications/ScreenShot.app`，旧版保留为工程父目录的 `ScreenShot-before-native-start-fix-20261021.app`。
+
 - 2026-10-21 录屏排除工具与 Chrome 连续录制：
   - macOS 原生过滤同时按应用标识和主进程 PID 排除 ScreenShot，包括后续显示的主窗口及截图覆盖层；排除标题为“ScreenShot · 本机录屏”的浏览器控制窗口，来源列表和后台均拒绝将其作为录制目标。主窗口与覆盖层另设置系统内容保护。
   - Chrome/Edge 控制页以独立应用窗口打开。标签页继续由浏览器授权，排除自身页签并检查其他控制页的 Capture Handle；macOS 窗口、桌面和区域通过同一本机原生组件采集，普通浏览器窗口仍可录制。

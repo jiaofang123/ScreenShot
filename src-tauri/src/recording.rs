@@ -247,7 +247,7 @@ impl RecordingManager {
             crate::capture::show_main_window(&app);
             return Err(error);
         }
-        Ok(status)
+        Ok(self.status().unwrap_or(status))
     }
 
     pub fn status(&self) -> Option<RecordingStatus> {
@@ -280,7 +280,7 @@ impl RecordingManager {
         self.prepare_with_app(options, path, browser, sink, None)
     }
 
-    fn prepare_with_app(
+    pub(crate) fn prepare_with_app(
         &self,
         options: RecordingOptions,
         path: PathBuf,
@@ -439,14 +439,18 @@ pub async fn native_source_preview(kind: String, id: u32) -> Result<String, Stri
 }
 
 #[tauri::command]
-pub fn start_native_recording(
+pub async fn start_native_recording(
     app: AppHandle,
-    state: State<'_, RecordingManager>,
     options: RecordingOptions,
     source: serde_json::Value,
     path: String,
 ) -> Result<RecordingStatus, String> {
-    state.start_native(app, options, source, path.into())
+    tauri::async_runtime::spawn_blocking(move || {
+        app.state::<RecordingManager>()
+            .start_native(app.clone(), options, source, path.into())
+    })
+    .await
+    .map_err(|error| format!("录屏启动任务异常：{error}"))?
 }
 
 impl Drop for RecordingManager {
@@ -1121,12 +1125,34 @@ fn launch_native(
         .arg(&temporary)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("无法启动原生录屏：{e}"))?;
     let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
     let output = child.stdout.take().unwrap();
+    let errors = child.stderr.take().unwrap();
+    let diagnostics = thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let mut tail = String::new();
+        for line in BufReader::new(errors).lines().map_while(Result::ok) {
+            tail.push_str(&line);
+            tail.push('\n');
+            if tail.len() > 8192 {
+                tail = tail
+                    .chars()
+                    .rev()
+                    .take(4096)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+            }
+        }
+        tail
+    });
     let child = Arc::new(Mutex::new(child));
+    let startup_process = child.clone();
+    let startup_session = session.clone();
     session.native_running.store(true, Ordering::Release);
     let recording_id = session.status.lock().id.clone();
     let controller = session.clone();
@@ -1210,13 +1236,28 @@ fn launch_native(
                 "saved" => {
                     saved = true;
                 }
-                "error" => {
+                "error" | "sourceEnded" => {
                     message = value["message"].as_str().unwrap_or("原生录屏失败").into();
                 }
                 _ => {}
             }
         }
-        let _ = child.lock().wait();
+        let exit_status = child.lock().wait();
+        let diagnostic = diagnostics.join().unwrap_or_default();
+        if !saved {
+            if message == "原生录屏进程已结束" {
+                message = format!(
+                    "原生录屏进程异常退出（{}）",
+                    exit_status
+                        .map(|status| status.to_string())
+                        .unwrap_or_else(|error| error.to_string())
+                );
+            }
+            if !diagnostic.trim().is_empty() {
+                message.push_str("：");
+                message.push_str(diagnostic.trim());
+            }
+        }
         if saved && mix_audio {
             session.update(|status| {
                 status.phase = "saving".into();
@@ -1274,7 +1315,19 @@ fn launch_native(
             session.shutdown.store(true, Ordering::Release);
         }
     });
-    Ok(())
+    let started = Instant::now();
+    loop {
+        let status = startup_session.status.lock().clone();
+        match status.phase.as_str() {
+            "recording" | "paused" | "saved" => return Ok(()),
+            "error" | "cancelled" => return Err(status.message),
+            _ if started.elapsed() > Duration::from_secs(15) => {
+                let _ = startup_process.lock().kill();
+                return Err("原生录屏启动超时，请检查屏幕录制权限后重试".into());
+            }
+            _ => thread::sleep(Duration::from_millis(15)),
+        }
+    }
 }
 
 fn available_browsers() -> Vec<(String, String, PathBuf)> {
