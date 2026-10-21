@@ -23,12 +23,7 @@
 .recording-sources[hidden] { display: none; }
 .native-recording-panel select[aria-label="录制目标"] { max-width: 500px; }
 .native-region { color: #9aadc1; font-size: 11px; margin: 14px 0; }
-.native-region-stage { position: relative; max-width: 600px; margin: 10px auto; line-height: 0; overflow: hidden; border: 1px solid #385347; border-radius: 6px; touch-action: none; user-select: none; cursor: crosshair; }
-.native-region-stage img { display: block; width: 100%; pointer-events: none; }
-.native-region-crop { position: absolute; border: 1px solid #72e0ba; box-shadow: 0 0 0 200vmax #0008; pointer-events: none; }
-.region-handle { position: absolute; width: 14px; height: 14px; background: #72e0ba; border: 1px solid #133b2c; pointer-events: auto; }
-.region-handle.nw { top:-7px;left:-7px;cursor:nwse-resize; }.region-handle.ne { top:-7px;right:-7px;cursor:nesw-resize; }
-.region-handle.sw { bottom:-7px;left:-7px;cursor:nesw-resize; }.region-handle.se { bottom:-7px;right:-7px;cursor:nwse-resize; }
+.native-region p { line-height: 1.8; }
 .recording-panel { max-width: 1120px; margin: auto; padding: 28px 30px; border: 1px solid #253142; border-radius: 20px; background: linear-gradient(140deg, #141e29, #0e141e); }
 .recording-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .recording-heading h2 { margin: 8px 0 0; font-size: 27px; letter-spacing: -.04em; }

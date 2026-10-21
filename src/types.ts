@@ -9,6 +9,7 @@ export interface CapturePayload {
 }
 
 export interface OverlaySnapshot {
+  purpose?: "screenshot" | "recording";
   sessionId: number;
   monitorId: number;
   name: string;

@@ -235,6 +235,8 @@ pub fn run() {
             capture::begin_capture,
             capture::get_overlay_snapshot,
             capture::show_overlay_window,
+            capture::select_recording_region,
+            capture::finish_recording_region_selection,
             capture::finish_region_capture,
             capture::copy_region_to_clipboard,
             capture::start_long_capture,

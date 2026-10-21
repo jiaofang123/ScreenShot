@@ -34,6 +34,28 @@ pub struct AppState {
     capture_in_progress: AtomicBool,
     overlay_session: AtomicU64,
     overlay_setup: Mutex<()>,
+    recording_selection: Mutex<Option<RecordingSelectionRequest>>,
+}
+
+struct RecordingSelectionRequest {
+    session_id: u64,
+    monitor_id: u32,
+    reply: async_runtime::Sender<Option<RecordingSelection>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordingCrop {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecordingSelection {
+    crop: RecordingCrop,
+    width: u32,
+    height: u32,
 }
 
 struct CursorHideGuard {
@@ -103,6 +125,7 @@ pub struct OverlaySnapshot {
     height: u32,
     scale_factor: f32,
     data_url: String,
+    purpose: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -159,6 +182,9 @@ pub async fn begin_capture(app: AppHandle) -> Result<(), String> {
 
 pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
+    if state.recording_selection.lock().is_some() {
+        return Ok(()); // A screenshot shortcut must not replace the recording picker.
+    }
     if state.long_capture_cancel.lock().is_some() {
         return Err("长截图正在进行，请先按快捷键停止".to_string());
     }
@@ -171,7 +197,8 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
     {
         return Ok(()); // Repeated shortcuts must not show the main window during a freeze.
     }
-    let result = begin_capture_session(app.clone()).await;
+    let session_id = state.overlay_session.fetch_add(1, Ordering::AcqRel) + 1;
+    let result = begin_capture_session(app.clone(), session_id, None).await;
     state.capture_in_progress.store(false, Ordering::Release);
     if result.is_err() {
         state.snapshots.lock().clear();
@@ -181,22 +208,67 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
     result
 }
 
-async fn begin_capture_session(app: AppHandle) -> Result<(), String> {
+#[tauri::command]
+pub async fn select_recording_region(
+    app: AppHandle,
+    monitor_id: u32,
+) -> Result<Option<RecordingSelection>, String> {
+    let state = app.state::<AppState>();
+    ensure_screen_capture_permission(&app)?;
+    if state
+        .capture_in_progress
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err("正在准备截图，请稍候".into());
+    }
+    if state.recording_selection.lock().is_some()
+        || state.long_capture_cancel.lock().is_some()
+        || !state.snapshots.lock().is_empty()
+    {
+        state.capture_in_progress.store(false, Ordering::Release);
+        return Err("请先完成或取消当前框选".into());
+    }
+    let session_id = state.overlay_session.fetch_add(1, Ordering::AcqRel) + 1;
+    let (reply, mut result) = async_runtime::channel(1);
+    *state.recording_selection.lock() = Some(RecordingSelectionRequest {
+        session_id,
+        monitor_id,
+        reply,
+    });
+    let prepared = begin_capture_session(app.clone(), session_id, Some(monitor_id)).await;
+    state.capture_in_progress.store(false, Ordering::Release);
+    if let Err(error) = prepared {
+        if state.overlay_session.load(Ordering::Acquire) == session_id {
+            cancel_capture(app.clone(), state);
+        }
+        return Err(error);
+    }
+    result
+        .recv()
+        .await
+        .ok_or_else(|| "区域框选已结束，请重新选择".into())
+}
+
+async fn begin_capture_session(
+    app: AppHandle,
+    session_id: u64,
+    target_monitor: Option<u32>,
+) -> Result<(), String> {
     let started = Instant::now();
-    let session_id = app
-        .state::<AppState>()
-        .overlay_session
-        .fetch_add(1, Ordering::AcqRel)
-        + 1;
     app.state::<AppState>().snapshots.lock().clear();
     hide_overlay_windows(&app);
     if let Some(main) = app.get_webview_window("main") {
-        let _ = main.hide();
+        main.hide()
+            .map_err(|error| format!("无法隐藏工具窗口：{error}"))?;
     }
 
-    let snapshots = async_runtime::spawn_blocking(move || capture_all_monitors(session_id))
-        .await
-        .map_err(|error| format!("截图任务异常：{error}"))??;
+    // Capture only after ordering the tool out. The shared capture path also waits
+    // for the window server/cursor update before reading the desktop pixels.
+    let snapshots =
+        async_runtime::spawn_blocking(move || capture_all_monitors(session_id, target_monitor))
+            .await
+            .map_err(|error| format!("截图任务异常：{error}"))??;
     if app
         .state::<AppState>()
         .overlay_session
@@ -366,6 +438,11 @@ pub fn get_overlay_snapshot(
     state: State<'_, AppState>,
     monitor_id: u32,
 ) -> Result<OverlaySnapshot, String> {
+    let recording_session = state
+        .recording_selection
+        .lock()
+        .as_ref()
+        .map(|request| request.session_id);
     let snapshots = state.snapshots.lock();
     let snapshot = snapshots
         .get(&monitor_id)
@@ -378,7 +455,71 @@ pub fn get_overlay_snapshot(
         height: snapshot.height,
         scale_factor: snapshot.scale_factor,
         data_url: snapshot.preview_data_url.clone(),
+        purpose: if recording_session == Some(snapshot.session_id) {
+            "recording"
+        } else {
+            "screenshot"
+        },
     })
+}
+
+fn recording_region(
+    state: &AppState,
+    region: &CaptureRegion,
+) -> Result<RecordingSelection, String> {
+    let requests = state.recording_selection.lock();
+    let request = requests.as_ref().ok_or("录屏框选会话已失效，请重新选择")?;
+    if request.session_id != region.session_id || request.monitor_id != region.monitor_id {
+        return Err("录屏框选会话已失效，请重新选择".into());
+    }
+    let snapshots = state.snapshots.lock();
+    let snapshot = snapshots
+        .get(&region.monitor_id)
+        .ok_or("录屏框选会话已失效，请重新选择")?;
+    if snapshot.session_id != region.session_id {
+        return Err("录屏框选会话已失效，请重新选择".into());
+    }
+    if region.width < 8 || region.height < 8 {
+        return Err("录制区域至少需要 8 × 8 像素".into());
+    }
+    if region
+        .x
+        .checked_add(region.width)
+        .is_none_or(|right| right > snapshot.width)
+        || region
+            .y
+            .checked_add(region.height)
+            .is_none_or(|bottom| bottom > snapshot.height)
+    {
+        return Err("框选区域超出显示器范围".into());
+    }
+    Ok(RecordingSelection {
+        crop: RecordingCrop {
+            x: region.x as f64 / snapshot.width as f64,
+            y: region.y as f64 / snapshot.height as f64,
+            width: region.width as f64 / snapshot.width as f64,
+            height: region.height as f64 / snapshot.height as f64,
+        },
+        width: region.width,
+        height: region.height,
+    })
+}
+
+#[tauri::command]
+pub fn finish_recording_region_selection(
+    app: AppHandle,
+    region: CaptureRegion,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let selection = recording_region(&state, &region)?;
+    state.overlay_session.fetch_add(1, Ordering::AcqRel);
+    state.snapshots.lock().clear();
+    hide_overlay_windows(&app);
+    show_main_window(&app);
+    if let Some(request) = state.recording_selection.lock().take() {
+        let _ = request.reply.try_send(Some(selection));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -442,6 +583,9 @@ async fn complete_region_capture(
     destination: RegionDestination,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
+    if state.recording_selection.lock().is_some() {
+        return Err("请先确认或取消录屏区域".into());
+    }
     if state
         .capture_in_progress
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -495,6 +639,9 @@ pub fn start_long_capture(
     state: State<'_, AppState>,
     region: CaptureRegion,
 ) -> Result<(), String> {
+    if state.recording_selection.lock().is_some() {
+        return Err("请先确认或取消录屏区域".into());
+    }
     if state.long_capture_cancel.lock().is_some() {
         return Err("已有长截图任务正在运行".to_string());
     }
@@ -539,7 +686,11 @@ pub fn cancel_capture(app: AppHandle, state: State<'_, AppState>) {
     state.snapshots.lock().clear();
     hide_overlay_windows(&app);
     show_main_window(&app);
-    let _ = app.emit_to("main", "capture-cancelled", ());
+    if let Some(request) = state.recording_selection.lock().take() {
+        let _ = request.reply.try_send(None);
+    } else {
+        let _ = app.emit_to("main", "capture-cancelled", ());
+    }
 }
 
 fn run_long_capture(
@@ -641,8 +792,15 @@ fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<Rgba
         .map_err(|error| format!("无法捕获屏幕区域：{error}"))
 }
 
-fn capture_all_monitors(session_id: u64) -> Result<HashMap<u32, MonitorSnapshot>, String> {
+fn capture_all_monitors(
+    session_id: u64,
+    target_monitor: Option<u32>,
+) -> Result<HashMap<u32, MonitorSnapshot>, String> {
     let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
+    let monitors: Vec<_> = monitors
+        .into_iter()
+        .filter(|monitor| target_monitor.is_none_or(|target| monitor.id().ok() == Some(target)))
+        .collect();
     let cursor_guard = hide_cursor_for_monitors(&monitors);
     let cursor_position_guard = move_cursor_to_safe_edge(&monitors);
     wait_for_cursor_hide();
@@ -992,6 +1150,44 @@ mod tests {
         let (state, mut region) = capture_fixture();
         region.session_id -= 1;
         assert!(copy_snapshot(&state, &region, |_| panic!("不可复制过期选区")).is_err());
+        assert_eq!(state.snapshots.lock().len(), 1);
+    }
+
+    #[test]
+    fn recording_selection_normalizes_physical_pixels_without_consuming_the_snapshot() {
+        let (state, mut region) = capture_fixture();
+        let (reply, _result) = async_runtime::channel(1);
+        *state.recording_selection.lock() = Some(RecordingSelectionRequest {
+            session_id: 7,
+            monitor_id: 1,
+            reply,
+        });
+        region.x = 2;
+        region.y = 1;
+        region.width = 10;
+        region.height = 8;
+        let selected = recording_region(&state, &region).unwrap();
+        assert_eq!((selected.width, selected.height), (10, 8));
+        assert_eq!(selected.crop.x, 2.0 / 12.0);
+        assert_eq!(selected.crop.y, 0.1);
+        assert_eq!(selected.crop.width, 10.0 / 12.0);
+        assert_eq!(selected.crop.height, 0.8);
+        assert_eq!(state.snapshots.lock().len(), 1);
+
+        region.session_id = 6;
+        assert!(recording_region(&state, &region).is_err());
+        region.session_id = 7;
+        region.monitor_id = 2;
+        assert!(recording_region(&state, &region).is_err());
+        region.monitor_id = 1;
+        region.width = 7;
+        assert!(recording_region(&state, &region).is_err());
+        region.width = 11;
+        assert!(recording_region(&state, &region).is_err());
+        region.x = u32::MAX;
+        assert!(recording_region(&state, &region).is_err());
+        state.recording_selection.lock().take();
+        assert!(recording_region(&state, &region).is_err());
         assert_eq!(state.snapshots.lock().len(), 1);
     }
 }

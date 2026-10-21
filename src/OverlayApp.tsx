@@ -10,7 +10,7 @@ interface Selection {
   height: number;
 }
 
-type CaptureAction = "copy" | "edit" | "long";
+type CaptureAction = "copy" | "edit" | "long" | "record";
 type SelectionCorner = "nw" | "ne" | "sw" | "se";
 
 interface DragSession {
@@ -52,6 +52,7 @@ function OverlayApp() {
   const [toolbarSize, setToolbarSize] = useState({ width: 360, height: 48 });
   const processing = operation !== null;
   const dragging = dragMode !== null;
+  const recordingRegion = snapshot?.purpose === "recording";
 
   const selection = useMemo(
     () => (start && end ? normalizeSelection(start, end) : null),
@@ -128,7 +129,7 @@ function OverlayApp() {
       if (event.key === "Enter" && showToolbar &&
         !(event.target instanceof Element && event.target.closest("button"))) {
         event.preventDefault();
-        void finish("copy");
+        void finish(recordingRegion ? "record" : "copy");
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -231,7 +232,7 @@ function OverlayApp() {
         if (processingSession.current !== region.sessionId) return;
         await invoke("start_long_capture", { region });
       } else {
-        await invoke(kind === "copy" ? "copy_region_to_clipboard" : "finish_region_capture", { region });
+        await invoke(kind === "record" ? "finish_recording_region_selection" : kind === "copy" ? "copy_region_to_clipboard" : "finish_region_capture", { region });
       }
     } catch (error) {
       if (processingSession.current === region.sessionId) {
@@ -338,7 +339,10 @@ function OverlayApp() {
           style={{ left: toolbarLeft, top: toolbarTop }}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          <button className="accent" disabled={processing} onClick={() => finish("copy")}
+          {recordingRegion ? <button className="accent" disabled={processing} onClick={() => finish("record")}
+            title="确认范围并返回录屏设置（Enter）">
+            {operation === "record" ? "正在确认…" : "确认录制区域"}
+          </button> : <><button className="accent" disabled={processing} onClick={() => finish("copy")}
             title="直接复制选区截图（Enter）">
             {operation === "copy" ? "正在复制…" : "完成并复制"}
           </button>
@@ -352,7 +356,8 @@ function OverlayApp() {
           >
             滚动长截图
           </button>
-          <button className="icon-only" disabled={processing} aria-label="取消截图"
+          </>}
+          <button className="icon-only" disabled={processing} aria-label={recordingRegion ? "取消框选" : "取消截图"}
             onClick={() => invoke("cancel_capture")}>
             Esc
           </button>
@@ -361,7 +366,7 @@ function OverlayApp() {
 
       <div className="overlay-hint">
         <strong>{snapshot.name}</strong>
-        <span>拖动框选 · 拖动四角调整 · Enter 复制 · Esc 取消</span>
+        <span>{recordingRegion ? "拖动框选录制范围 · 拖动四角调整 · Enter 确认 · Esc 取消" : "拖动框选 · 拖动四角调整 · Enter 复制 · Esc 取消"}</span>
       </div>
       {instruction && <div className="overlay-instruction">{instruction}</div>}
     </div>

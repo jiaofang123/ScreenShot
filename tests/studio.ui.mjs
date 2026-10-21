@@ -43,7 +43,7 @@ await page.addInitScript(({fixture,directory})=>{
       if(cmd==='plugin:dialog|save')return `${directory}/录屏.mp4`;
       if(cmd==='native_recording_available')return true;
       if(cmd==='native_capture_sources')return [{id:1,kind:'desktop',name:'测试桌面',width:640,height:360},{id:2,kind:'window',name:'测试应用窗口',width:640,height:360}];
-      if(cmd==='native_source_preview')return 'data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="360"><rect width="640" height="360" fill="#32597d"/></svg>');
+      if(cmd==='select_recording_region')return {crop:{x:.12,y:.2,width:.48,height:.6},width:307,height:216};
       if(cmd==='get_recording_status')return window.recordStatus;
       if(cmd==='start_native_recording'){window.recordStatus={id:'native-test',mode:args.options.mode,phase:'recording',message:'原生录屏进行中',elapsedMs:0,bytesWritten:0,filePath:null,width:320,height:180,browser:'macOS 原生录屏'};window.statusEvent(window.recordStatus);return window.recordStatus;}
       if(cmd==='recording_control'){const phase=args.action==='stop'?'saved':args.action==='pause'?'paused':'recording';window.statusEvent({...window.recordStatus,phase,message:phase==='saved'?'录屏已保存':'录屏进行中',filePath:phase==='saved'?fixture:null});}
@@ -70,13 +70,13 @@ try{
   await page.getByRole('button',{name:'截图',exact:true}).click();await page.getByRole('button',{name:'开始截图',exact:true}).waitFor();
   await page.getByRole('button',{name:'视频制作',exact:true}).click();assert.equal(await editor.locator('#scriptText').inputValue(),'这是整合后的中文旁白。');
   await editor.locator('#recordBtn').click();await page.getByRole('radio',{name:/框选区域/}).check();
-  const stage=page.locator('.native-region-stage');await stage.waitFor();const box=await stage.boundingBox();
-  await page.mouse.move(box.x+box.width*.1,box.y+box.height*.2);await page.mouse.down();await page.mouse.move(box.x+box.width*.6,box.y+box.height*.8);await page.mouse.up();
-  const corner=await page.locator('.region-handle.nw').boundingBox();
-  await page.mouse.move(corner.x+7,corner.y+7);await page.mouse.down();await page.mouse.move(corner.x+7+box.width*.02,corner.y+7);await page.mouse.up();
+  await page.getByRole('button',{name:'框选录制区域',exact:true}).click();
+  await page.getByText('已选择 307 × 216 像素。可重新框选调整范围。',{exact:true}).waitFor();
   await page.getByRole('button',{name:'开始录屏',exact:true}).click();await page.getByText('原生录屏进行中',{exact:true}).waitFor({timeout:10000});
   const calls=await page.evaluate(()=>window.calls);const nativeCall=calls.find(item=>item.cmd==='start_native_recording');
   assert.equal(nativeCall.args.options.mode,'region');assert.ok(Math.abs(nativeCall.args.source.crop.width-.48)<.01);
+  assert.equal(calls.find(item=>item.cmd==='select_recording_region').args.monitorId,1);
+  assert.equal(calls.filter(item=>item.cmd==='native_source_preview').length,0);
   assert.equal(calls.filter(item=>item.cmd==='start_recording_session').length,0);
   await page.getByRole('button',{name:'停止并保存',exact:true}).click();
   await editor.locator('#assetCount').getByText('2',{exact:true}).waitFor();
