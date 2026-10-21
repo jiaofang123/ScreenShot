@@ -17,6 +17,7 @@ const METHODS: &[&str] = &[
     "project:openFolder",
     "project:saveAsFolder",
     "project:save",
+    "project:deleteSegment",
     "project:importVideos",
     "tts:generate",
     "audio:preparePreview",

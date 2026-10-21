@@ -1,8 +1,8 @@
 // Adapted from jiaofang123/Video-Narration-Studio (41f55c8). No Electron runtime.
 import { randomUUID } from 'node:crypto';
 import { statSync } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join, relative as pathRelative, resolve } from 'node:path';
+import { copyFile, mkdir, readFile, rename, stat, unlink, writeFile, realpath, readdir, lstat, mkdtemp, rm, rmdir } from 'node:fs/promises';
+import { basename, dirname, extname, join, relative as pathRelative, resolve, isAbsolute, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import os from 'node:os';
@@ -291,7 +291,7 @@ async function buildTextOverlayFilters({ projectRoot, outputId, textOverlays = [
     const boxHeight = `${overlay.height.toFixed(6)}*ih`;
     const textX = `${overlay.x.toFixed(6)}*w`;
     const textY = `${overlay.y.toFixed(6)}*h`;
-    const enableWindow = `enable='between(t,${overlay.start.toFixed(3)},${overlay.end.toFixed(3)})'`;
+    const enableWindow = `enable='gte(t,${overlay.start.toFixed(3)})*lt(t,${overlay.end.toFixed(3)})'`;
     if (overlay.backgroundOpacity > 0) {
       const next = `vbox${overlayIndex}`;
       filters.push(
@@ -433,8 +433,87 @@ async function writeProject(project) {
     updatedAt: now()
   };
   await ensureDir(normalized.rootDir);
-  await writeFile(projectFile(normalized.rootDir), `${JSON.stringify(normalized, null, 2)}\n`);
+  const temporary = join(normalized.rootDir, `.project-${randomUUID()}.tmp`);
+  try {
+    await writeFile(temporary, `${JSON.stringify(normalized, null, 2)}\n`);
+    await rename(temporary, projectFile(normalized.rootDir));
+  } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
   return normalized;
+}
+
+function inside(parent, file) {
+  const relative = pathRelative(parent, file);
+  return Boolean(relative && relative !== '..' && !relative.startsWith(`..${sep}`) && !isAbsolute(relative));
+}
+
+async function deleteProjectSegment({ project, assetId, segmentId }) {
+  if (!project?.rootDir || !segmentId) throw new Error('文字稿删除参数不完整。');
+  const root = await realpath(project.rootDir);
+  if (!(await stat(projectFile(root))).isFile()) throw new Error('视频项目不存在。');
+  const updated = structuredClone(project);
+  const asset = updated.assets?.find(asset => asset.id === assetId);
+  const segment = asset?.segments?.find(segment => segment.id === segmentId);
+  if (!segment) throw new Error('文字稿段已不存在。');
+  asset.segments = asset.segments.filter(item => item.id !== segmentId);
+  asset.segmentsInitialized = true;
+  updated.updatedAt = now();
+  const voicesRoot = await ensureDir(join(root, 'voices'));
+  const canonicalVoices = await realpath(voicesRoot);
+  if (!inside(root, canonicalVoices)) throw new Error('语音目录位于项目外，无法安全清理。');
+  const candidates = new Set(), retained = new Set(), references = new Set();
+  function voiceFiles(voice) {
+    const files = [voice.path, voice.textPath].filter(Boolean).map(file => resolve(file));
+    if (voice.path) {
+      const stem = join(dirname(voice.path), basename(voice.path, extname(voice.path)));
+      files.push(`${stem}.aiff`, `${stem}.preview.wav`);
+    }
+    return files;
+  }
+  for (const other of updated.assets || []) for (const entry of other.segments || []) for (const voice of entry.voiceVersions || []) {
+    for (const file of voiceFiles(voice)) references.add(await realpath(file).catch(() => file));
+  }
+  for (const voice of segment.voiceVersions || []) for (const file of voiceFiles(voice)) candidates.add(file);
+  // Include old generated versions/intermediate files belonging to this segment.
+  const segmentDirectory = join(voicesRoot, String(segmentId));
+  let cleanDirectory = null;
+  if (inside(voicesRoot, resolve(segmentDirectory)) && dirname(resolve(segmentDirectory)) === resolve(voicesRoot)) {
+    const info = await lstat(segmentDirectory).catch(() => null);
+    if (info?.isDirectory() && inside(canonicalVoices, await realpath(segmentDirectory))) {
+      cleanDirectory = segmentDirectory;
+      for (const name of await readdir(segmentDirectory)) candidates.add(join(segmentDirectory, name));
+    }
+  }
+  const files = [];
+  for (const candidate of candidates) {
+    const info = await lstat(candidate).catch(error => { if (error.code === 'ENOENT') return null; throw error; });
+    if (!info) continue;
+    const canonical = await realpath(candidate);
+    if (!info.isFile() || !inside(canonicalVoices, canonical) || references.has(canonical)) { retained.add(candidate); continue; }
+    if (!files.includes(canonical)) files.push(canonical);
+  }
+  const tmp = await realpath(await ensureDir(join(root, 'tmp')));
+  if (!inside(root, tmp)) throw new Error('项目临时目录位于项目外，无法删除文字稿。');
+  const transaction = await mkdtemp(join(tmp, 'delete-segment-'));
+  const staged = [];
+  try {
+    for (const [index, original] of files.entries()) {
+      const destination = join(transaction, String(index));
+      await rename(original, destination); staged.push({ original, destination });
+    }
+    // Commit metadata atomically only after every voice file has been staged.
+    const metadata = join(transaction, 'project.json');
+    await writeFile(metadata, JSON.stringify(updated, null, 2) + '\n');
+    await rename(metadata, projectFile(root));
+  } catch (error) {
+    for (const { original, destination } of staged.reverse()) await rename(destination, original);
+    await rm(transaction, { recursive: true, force: true });
+    throw error;
+  }
+  let cleanupPending = false;
+  await rm(transaction, { recursive: true, force: true }).catch(() => { cleanupPending = true; });
+  // Only an empty generated segment folder is removed; shared files remain.
+  if (cleanDirectory) await rmdir(cleanDirectory).catch(() => {});
+  return { deletedFiles: files.length, retainedFiles: retained.size, cleanupPending };
 }
 
 async function copyIfDifferent(source, target) {
@@ -747,6 +826,7 @@ async function generateVoiceWithWindowsSapi(values) {
   ipcMain.handle("project:save", async (_event, project) => {
     return writeProject(project);
   });
+  ipcMain.handle('project:deleteSegment', async (_event, payload) => deleteProjectSegment(payload));
   ipcMain.handle("project:importVideos", async (_event, payload = {}) => {
     if (!payload.projectRoot) throw new Error("请先创建或打开项目。");
     const result = await dialog.showOpenDialog(mainWindow, {

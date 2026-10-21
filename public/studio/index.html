@@ -41,6 +41,11 @@
               <h2>插入文字详情列表（<span id="insertedTextCount">0</span>）</h2>
             </div>
             <div class="inserted-text-list" id="insertedTextList"></div>
+            <div id="textTimingPanel" class="text-timing-panel" hidden>
+              <label>插入时间（秒）<input id="textStartTime" type="number" min="0" step="0.001" aria-label="文字插入时间（秒）"></label>
+              <label>显示时长（秒）<input id="textDuration" type="number" min="0.1" step="0.001" aria-label="文字显示时长（秒）"></label>
+              <span id="textEndTime" class="item-meta"></span>
+            </div>
           </section>
         </aside>
 
@@ -93,6 +98,7 @@
               </div>
             </div>
             <div class="queue" id="mergeQueue"></div>
+            <p class="sort-help">拖动卡片或手柄调整合并顺序，编号固定；手柄也可用上下方向键排序。</p>
           </div>
         </section>
 

@@ -1,3 +1,4 @@
+import { attachSortable } from './sortable.js';
 const $ = (id) => document.getElementById(id);
 const TEXT_OVERLAY_PLACEHOLDER = "输入文字";
 const TEXT_OVERLAY_DEFAULT_DURATION = 2;
@@ -9,6 +10,7 @@ const els = {
   assetList: $("assetList"),
   insertedTextCount: $("insertedTextCount"),
   insertedTextList: $("insertedTextList"),
+  textTimingPanel: $("textTimingPanel"), textStartTime: $("textStartTime"), textDuration: $("textDuration"), textEndTime: $("textEndTime"),
   queueCount: $("queueCount"),
   mergeQueue: $("mergeQueue"),
   previewTitle: $("previewTitle"),
@@ -380,10 +382,12 @@ const state = {
   recordingStopTrimTailSeconds: 0,
   recordingStopping: false,
   recordingTimer: null,
-  draggedQueueId: null,
+  deletingSegmentId: null,
+  voiceJobs: new Set(),
   selectedTextOverlayId: null,
   textOverlayRect: null,
   saveTimer: null,
+  saveChain: Promise.resolve(),
   previewAudio: null,
   previewAudioVoiceId: null
 };
@@ -416,6 +420,11 @@ function createDemoBridge() {
     openProject: async () => load(),
     openProjectFolder: async () => load(),
     saveProject: async (project) => save(project),
+    deleteSegment: async ({ project, assetId, segmentId }) => {
+      const asset = project.assets.find(asset => asset.id === assetId);
+      asset.segments = asset.segments.filter(segment => segment.id !== segmentId);
+      asset.segmentsInitialized = true; save(project); return {};
+    },
     saveProjectFolder: async (project) => save(project),
     registerStopShortcut: async () => false,
     unregisterStopShortcut: async () => true,
@@ -626,10 +635,11 @@ function ensureDefaultSegment(asset, select = false) {
   if (!asset) return null;
   asset.segments ||= [];
   let created = false;
-  if (!asset.segments.length) {
+  if (!asset.segments.length && !asset.segmentsInitialized) {
     asset.segments.push(createSegment(asset, 0));
     created = true;
   }
+  if (!asset.segmentsInitialized) { asset.segmentsInitialized = true; created = true; }
   if (select && !asset.segments.some((segment) => segment.id === state.selectedSegmentId)) {
     state.selectedSegmentId = asset.segments[0]?.id || null;
   }
@@ -643,8 +653,8 @@ function clampNumber(value, min, max) {
 
 function createTextOverlay(startTime = currentPreviewTime()) {
   const now = new Date().toISOString();
-  const start = Math.max(0, Number(startTime || 0));
   const duration = Number(els.videoPreview.duration || 0);
+  const start = Math.max(0, Math.min(Number(startTime || 0), Number.isFinite(duration) && duration > 0 ? Math.max(0, duration - 0.1) : Infinity));
   const rect = state.textOverlayRect || videoContentRect();
   const rawEnd = Number.isFinite(duration) && duration > 0
     ? Math.min(duration, start + TEXT_OVERLAY_DEFAULT_DURATION)
@@ -778,10 +788,29 @@ function allRenderItems() {
       });
     });
   }
+  const order = new Map((project.renderOrder || []).map((id, index) => [id, index]));
   return items.sort((a, b) => {
+    if (order.size) return (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity) || Number(a.displayNumber || 0) - Number(b.displayNumber || 0);
     if (a.queueIndex !== b.queueIndex) return a.queueIndex - b.queueIndex;
-    return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
+    return new Date(a.createdAt || 0) - new Date(b.createdAt || 0) || Number(a.displayNumber || 0) - Number(b.displayNumber || 0);
   });
+}
+
+function ensureRenderNumbers() {
+  const project = state.project;
+  if (!project) return;
+  const renders = (project.assets || []).flatMap(asset => asset.renderVersions || []);
+  let next = Math.max(Number(project.nextRenderNumber) || 1, ...renders.map(render => (Number(render.displayNumber) || 0) + 1));
+  const used = new Set(); let changed = false;
+  for (const item of allRenderItems()) {
+    const render = renders.find(render => render.id === item.id);
+    if (!Number.isSafeInteger(render.displayNumber) || render.displayNumber < 1 || used.has(render.displayNumber)) { render.displayNumber = next++; changed = true; }
+    used.add(render.displayNumber);
+    const queued = project.mergeQueue?.find(value => value.id === render.id);
+    if (queued) queued.displayNumber = render.displayNumber;
+  }
+  if (project.nextRenderNumber !== next) { project.nextRenderNumber = next; changed = true; }
+  if (changed) saveProjectSoon();
 }
 
 function queueItemFromRender(render) {
@@ -790,6 +819,7 @@ function queueItemFromRender(render) {
     assetId: render.assetId,
     path: render.path,
     label: render.label,
+    displayNumber: render.displayNumber,
     addedAt: new Date().toISOString()
   };
 }
@@ -829,6 +859,7 @@ function stopVoicePreview() {
     } catch {
       // Some audio sources may not allow seeking before metadata is loaded.
     }
+    audio.removeAttribute('src'); audio.load();
   }
   state.previewAudio = null;
   state.previewAudioVoiceId = null;
@@ -836,11 +867,11 @@ function stopVoicePreview() {
 }
 
 async function saveProjectSoon() {
-  if (!state.project) return;
+  if (!state.project || state.deletingSegmentId) return;
   clearTimeout(state.saveTimer);
   state.saveTimer = setTimeout(async () => {
     try {
-      state.project = await bridge.saveProject(state.project);
+      await persistProject();
       renderHeader();
     } catch (error) {
       showToast(error.message || "保存项目失败", "error");
@@ -852,8 +883,15 @@ async function saveProjectNow() {
   if (!state.project) return;
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
-  state.project = await bridge.saveProject(state.project);
+  await persistProject();
   renderHeader();
+}
+
+function persistProject() {
+  const snapshot = structuredClone(state.project);
+  const job = state.saveChain.catch(() => {}).then(() => bridge.saveProject(snapshot));
+  state.saveChain = job;
+  return job.then(saved => { if (state.project?.id === snapshot.id) state.project.updatedAt = saved.updatedAt; });
 }
 
 async function ensureProject() {
@@ -892,6 +930,7 @@ function renderAssets() {
   }
   els.assetList.innerHTML = assets.map((asset) => `
     <div class="list-item ${asset.id === state.selectedAssetId ? "active" : ""}" data-asset-id="${asset.id}" role="button" tabindex="0">
+      <button class="sort-handle asset-sort-handle" data-sort-handle aria-label="拖动素材排序" title="拖动排序，或按上下方向键">⠿</button>
       <button class="asset-delete-button" data-delete-asset-id="${asset.id}" title="删除素材" aria-label="删除素材">×</button>
       <span class="item-title">
         <input class="asset-title-input" data-asset-title-id="${asset.id}" value="${escapeHtml(asset.name)}" aria-label="素材名称">
@@ -925,7 +964,7 @@ function renderAssets() {
       input.value = asset.name;
       refreshAssetRenderLabels(asset);
       saveProjectSoon();
-      renderAll();
+      renderMergeQueue();
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") input.blur();
@@ -963,6 +1002,7 @@ function syncInsertedTextListSelection() {
 
 function renderInsertedTextList() {
   if (!els.insertedTextCount || !els.insertedTextList) return;
+  syncTextTimingPanel();
   const overlays = currentTextOverlays()
     .map((overlay) => normalizeTextOverlay(overlay))
     .sort((a, b) => a.start - b.start || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
@@ -976,7 +1016,7 @@ function renderInsertedTextList() {
     const summary = textOverlaySummary(overlay);
     return `
       <div class="inserted-text-item ${overlay.id === state.selectedTextOverlayId ? "active" : ""}" data-text-overlay-list-id="${overlay.id}" data-tooltip="${escapeHtml(summary)}" title="${escapeHtml(summary)}" role="button" tabindex="0">
-        <div class="inserted-text-title">${escapeHtml(formatInsertMoment(overlay.start))}</div>
+        <div class="inserted-text-title">${escapeHtml(formatInsertMoment(overlay.start))} · 显示 ${(overlay.end - overlay.start).toFixed(1)} 秒</div>
         <div class="inserted-text-content">${escapeHtml(summary)}</div>
       </div>
     `;
@@ -1065,6 +1105,35 @@ function deleteVoice(voiceId, segmentId = state.selectedSegmentId) {
   showToast("转写语音已删除");
 }
 
+async function deleteSegment(segmentId) {
+  const project = state.project, asset = selectedAsset();
+  const segment = asset?.segments?.find(item => item.id === segmentId);
+  if (!project || !segment || state.deletingSegmentId || state.voiceJobs.has(segmentId)) return;
+  if (!confirm(`删除文字稿“${segmentTitle(segment, segmentIndex(asset, segmentId))}”及其对应的语音文件？`)) return;
+  updateSegmentFromForm();
+  if ((segment.voiceVersions || []).some(voice => voice.id === state.previewAudioVoiceId)) stopVoicePreview();
+  state.deletingSegmentId = segmentId; renderSegmentList();
+  clearTimeout(state.saveTimer); state.saveTimer = null;
+  const index = asset.segments.findIndex(item => item.id === segmentId);
+  try {
+    await state.saveChain.catch(() => {});
+    const result = await bridge.deleteSegment({ project: structuredClone(project), assetId: asset.id, segmentId });
+    if (state.project?.id === project.id) {
+      asset.segments = asset.segments.filter(item => item.id !== segmentId);
+      asset.segmentsInitialized = true;
+      if (state.selectedAssetId === asset.id && state.selectedSegmentId === segmentId) {
+        const next = asset.segments[Math.min(index, asset.segments.length - 1)];
+        state.selectedSegmentId = next?.id || null;
+        state.selectedVoiceId = next?.activeVoiceId || next?.voiceVersions?.at(-1)?.id || null;
+        state.previewPath = null;
+      }
+      await saveProjectNow(); renderAll();
+    }
+    showToast(result.cleanupPending ? "文字稿和语音已移除，部分临时文件未能清理" : result.retainedFiles ? "文字稿与语音已移除，共用或项目外文件已保留" : "文字稿及对应语音已删除");
+  } catch (error) { reportError(error); }
+  finally { state.deletingSegmentId = null; renderSegmentList(); if (state.project?.id === project.id) saveProjectSoon(); }
+}
+
 function deleteRenderVersion(renderId) {
   if (!state.project || !renderId) return;
   let ownerAsset = null;
@@ -1099,6 +1168,7 @@ function rgbaFromHex(hex, opacity) {
 }
 
 function syncTextStylePanel() {
+  syncTextTimingPanel();
   const overlay = selectedTextOverlay();
   const target = currentTextTarget();
   els.insertTextBtn.disabled = !target;
@@ -1409,10 +1479,15 @@ function handleInsertTextOverlay() {
   const overlay = createTextOverlay(currentPreviewTime());
   target.owner.textOverlays.push(overlay);
   state.selectedTextOverlayId = overlay.id;
+  if (currentPreviewTime() >= overlay.end) els.videoPreview.currentTime = overlay.start;
   saveProjectSoon();
   renderTextOverlays();
   renderInsertedTextList();
+  const focusBefore = document.activeElement;
   requestAnimationFrame(() => {
+    // A user may already be editing a timing field or the new text before this
+    // frame runs. Do not steal focus or replace their selection in that case.
+    if (document.activeElement !== focusBefore) return;
     const content = els.textOverlayLayer.querySelector(`[data-text-overlay-id="${overlay.id}"] .text-overlay-content`);
     if (!content) return;
     content.classList.add("editing");
@@ -1447,6 +1522,40 @@ function updateSelectedTextStyle() {
   renderTextOverlays();
 }
 
+function syncTextTimingPanel() {
+  const overlay = selectedTextOverlay();
+  els.textTimingPanel.hidden = !overlay;
+  if (!overlay) return;
+  normalizeTextOverlay(overlay);
+  const duration = Number(els.videoPreview.duration);
+  for (const [input, value] of [[els.textStartTime, overlay.start], [els.textDuration, overlay.end - overlay.start]]) {
+    if (document.activeElement !== input) { input.value = Number(value.toFixed(3)); input.setCustomValidity(''); }
+  }
+  if (Number.isFinite(duration) && duration > 0) {
+    els.textStartTime.max = String(Math.max(0, duration - 0.1));
+    els.textDuration.max = String(Math.max(0.1, duration - Number(els.textStartTime.value || 0)));
+  } else { els.textStartTime.removeAttribute('max'); els.textDuration.removeAttribute('max'); }
+  els.textEndTime.textContent = `结束时间 ${overlay.end.toFixed(2)} 秒`;
+}
+
+function updateTextTiming() {
+  const overlay = selectedTextOverlay();
+  if (!overlay) return;
+  const start = els.textStartTime.valueAsNumber, length = els.textDuration.valueAsNumber;
+  const duration = Number(els.videoPreview.duration);
+  els.textStartTime.setCustomValidity(''); els.textDuration.setCustomValidity('');
+  if (!Number.isFinite(start) || start < 0 || !Number.isFinite(length) || length < 0.1 ||
+      (Number.isFinite(duration) && duration > 0 && start + length > duration + 0.001)) {
+    const input = document.activeElement === els.textStartTime ? els.textStartTime : els.textDuration;
+    input.setCustomValidity('请输入有效时间，显示时长至少 0.1 秒，结束时间不能超过视频总时长。');
+    input.reportValidity(); return;
+  }
+  els.videoPreview.pause();
+  updateTextOverlay(overlay, { start, end: Number((start + length).toFixed(3)) });
+  els.videoPreview.currentTime = start;
+  renderTextOverlays(); renderInsertedTextList();
+}
+
 function renderPreview() {
   const asset = selectedAsset();
   const path = state.previewPath || asset?.path || "";
@@ -1465,7 +1574,7 @@ function renderPreview() {
   requestAnimationFrame(renderTextOverlays);
 }
 
-function renderInspector() {
+function renderInspector(refreshSegments = true) {
   const asset = selectedAsset();
   if (asset) ensureDefaultSegment(asset, true);
   const segment = selectedSegment();
@@ -1478,7 +1587,7 @@ function renderInspector() {
   els.segmentEnd.disabled = !hasSegment;
   els.scriptText.disabled = !hasSegment;
   els.speedSelect.disabled = !hasSegment;
-  els.generateVoiceBtn.disabled = !hasSegment;
+  els.generateVoiceBtn.disabled = !hasSegment || state.voiceJobs.has(segment?.id) || state.deletingSegmentId === segment?.id;
   els.previewVoiceBtn.disabled = !hasSegment || !currentVoice;
   setPreviewVoiceButtonState();
   els.synthesizeBtn.disabled = !asset || (textTarget?.type === "render" ? !hasAnyTextOverlay : (!hasAnyVoice && !hasAnyTextOverlay));
@@ -1487,7 +1596,7 @@ function renderInspector() {
   els.segmentEnd.value = hasSegment ? Number(segment.end || 10).toFixed(1) : "10";
   els.scriptText.value = hasSegment ? segment.text || "" : "";
   els.speedSelect.value = hasSegment ? segment.speed || "normal" : "normal";
-  renderSegmentList();
+  if (refreshSegments) renderSegmentList();
 
   const voiceItems = (asset?.segments || []).flatMap((item, segmentIndex) =>
     (item.voiceVersions || []).map((version, voiceIndex) => ({
@@ -1578,6 +1687,7 @@ function renderSegmentList() {
     const text = String(segment.text || "").trim();
     return `
       <div class="segment-list-item ${segment.id === state.selectedSegmentId ? "active" : ""}" data-segment-id="${segment.id}" role="button" tabindex="0">
+        <button class="delete-icon-button segment-delete-button" data-delete-segment-id="${segment.id}" ${state.deletingSegmentId || state.voiceJobs.has(segment.id) ? 'disabled' : ''} title="删除文字稿及语音" aria-label="删除文字稿及语音">×</button>
         <span class="item-title">
           <input class="segment-title-input" data-segment-title-id="${segment.id}" data-segment-previous-title="${escapeHtml(segmentTitle(segment, index))}" value="${escapeHtml(segmentTitle(segment, index))}" aria-label="文字稿标题">
           <span>${formatTime(segment.start)}-${formatTime(segment.end)}</span>
@@ -1586,10 +1696,14 @@ function renderSegmentList() {
       </div>
     `;
   }).join("");
+  els.segmentList.querySelectorAll('[data-delete-segment-id]').forEach(button => {
+    button.addEventListener('pointerdown', event => { if (event.button === 0) event.preventDefault(); });
+    button.addEventListener('click', event => { event.stopPropagation(); void deleteSegment(button.dataset.deleteSegmentId); });
+  });
   els.segmentList.querySelectorAll("[data-segment-title-id]").forEach((input) => {
     input.addEventListener("click", (event) => event.stopPropagation());
     input.addEventListener("focus", () => {
-      if (state.selectedSegmentId !== input.dataset.segmentTitleId) stopVoicePreview();
+      if (state.selectedSegmentId !== input.dataset.segmentTitleId) { updateSegmentFromForm(false); stopVoicePreview(); }
       state.selectedSegmentId = input.dataset.segmentTitleId;
       const segment = selectedSegment();
       state.selectedVoiceId = segment?.activeVoiceId || segment?.voiceVersions?.at(-1)?.id || null;
@@ -1597,6 +1711,7 @@ function renderSegmentList() {
       els.segmentList.querySelectorAll("[data-segment-id]").forEach((item) => {
         item.classList.toggle("active", item.dataset.segmentId === state.selectedSegmentId);
       });
+      renderInspector(false);
     });
     input.addEventListener("input", () => {
       const asset = selectedAsset();
@@ -1618,7 +1733,10 @@ function renderSegmentList() {
       input.value = title;
       input.dataset.segmentPreviousTitle = title;
       saveProjectSoon();
-      renderInspector();
+      for (const voice of segment.voiceVersions || []) {
+        const field = [...els.voiceVersions.querySelectorAll('[data-voice-title-id]')].find(field => field.dataset.voiceTitleId === voice.id);
+        if (field) field.value = voice.title || title;
+      }
     });
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") input.blur();
@@ -1636,11 +1754,11 @@ function renderSegmentList() {
       renderAll();
     };
     item.addEventListener("click", (event) => {
-      if (event.target.closest("input")) return;
+      if (event.target.closest("input,button")) return;
       selectSegment();
     });
     item.addEventListener("keydown", (event) => {
-      if (event.target.closest("input")) return;
+      if (event.target.closest("input,button")) return;
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       selectSegment();
@@ -1649,6 +1767,7 @@ function renderSegmentList() {
 }
 
 function renderMergeQueue() {
+  ensureRenderNumbers();
   const items = allRenderItems();
   els.queueCount.textContent = String(items.length);
   if (!items.length) {
@@ -1656,13 +1775,13 @@ function renderMergeQueue() {
     return;
   }
   els.mergeQueue.innerHTML = items.map((item) => {
-    const selectedIndex = item.selected ? item.queueIndex + 1 : null;
     return `
-    <div class="queue-item ${item.selected ? "active" : ""} ${item.id === state.selectedRenderId ? "previewing" : ""}" draggable="${item.selected}" data-queue-id="${item.id}" role="button" tabindex="0">
+    <div class="queue-item ${item.selected ? "active" : ""} ${item.id === state.selectedRenderId ? "previewing" : ""}" data-queue-id="${item.id}" role="button" tabindex="0">
       <span class="item-title">
+        <button class="sort-handle" data-sort-handle aria-label="拖动合成视频排序" title="拖动排序，或按上下方向键">⠿</button>
         <label class="merge-check">
           <input type="checkbox" data-merge-render-id="${item.id}" ${item.selected ? "checked" : ""}>
-          <span>${selectedIndex ? `${selectedIndex}. ` : ""}${escapeHtml(item.label)}</span>
+          <span><strong class="queue-number">${item.displayNumber}.</strong> ${escapeHtml(item.label)}</span>
         </label>
         <span class="version-actions">
           <button class="delete-icon-button" data-delete-render-id="${item.id}" title="删除合成视频" aria-label="删除合成视频">×</button>
@@ -1706,20 +1825,6 @@ function renderMergeQueue() {
       event.preventDefault();
       loadRenderPreview();
     });
-    item.addEventListener("dragstart", () => {
-      if (item.getAttribute("draggable") !== "true") return;
-      state.draggedQueueId = item.dataset.queueId;
-      item.classList.add("dragging");
-    });
-    item.addEventListener("dragend", () => {
-      state.draggedQueueId = null;
-      item.classList.remove("dragging");
-    });
-    item.addEventListener("dragover", (event) => event.preventDefault());
-    item.addEventListener("drop", (event) => {
-      event.preventDefault();
-      reorderQueue(state.draggedQueueId, item.dataset.queueId);
-    });
   });
 }
 
@@ -1733,7 +1838,7 @@ function renderAll() {
   renderMergeQueue();
 }
 
-function updateSegmentFromForm() {
+function updateSegmentFromForm(refreshList = true) {
   const segment = selectedSegment();
   if (!segment) return;
   const start = Math.max(0, Number(els.segmentStart.value || 0));
@@ -1743,7 +1848,7 @@ function updateSegmentFromForm() {
   segment.text = els.scriptText.value;
   segment.speed = els.speedSelect.value;
   saveProjectSoon();
-  renderSegmentList();
+  if (refreshList) renderSegmentList();
 }
 
 function addSegment() {
@@ -1775,19 +1880,20 @@ function toggleMergeQueue(render, checked) {
   } else {
     state.project.mergeQueue = state.project.mergeQueue.filter((item) => item.id !== render.id);
   }
+  if (state.project.renderOrder?.length) {
+    const order = new Map(state.project.renderOrder.map((id, index) => [id, index]));
+    state.project.mergeQueue.sort((a,b) => (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity));
+  }
   saveProjectSoon();
   renderMergeQueue();
   renderInspector();
 }
 
-function reorderQueue(sourceId, targetId) {
-  if (!sourceId || !targetId || sourceId === targetId || !state.project?.mergeQueue) return;
-  const queue = state.project.mergeQueue;
-  const sourceIndex = queue.findIndex((item) => item.id === sourceId);
-  const targetIndex = queue.findIndex((item) => item.id === targetId);
-  if (sourceIndex < 0 || targetIndex < 0) return;
-  const [source] = queue.splice(sourceIndex, 1);
-  queue.splice(targetIndex, 0, source);
+function reorderQueue(ids) {
+  if (!state.project) return;
+  state.project.renderOrder = ids;
+  const queued = new Map((state.project.mergeQueue || []).map(item => [item.id, item]));
+  state.project.mergeQueue = ids.filter(id => queued.has(id)).map(id => queued.get(id));
   saveProjectSoon();
   renderMergeQueue();
 }
@@ -1801,7 +1907,6 @@ function resetSelectionForProject(project) {
   state.previewPath = null;
   state.selectedSourceId = null;
   state.selectedArea = null;
-  state.draggedQueueId = null;
   state.selectedTextOverlayId = null;
 }
 
@@ -1893,6 +1998,7 @@ async function handleGenerateVoice() {
   const existingVoice = selectedVoice(segment) || segment.voiceVersions?.[0] || null;
   const nextDefaultTitle = segmentTitle(segment, segmentIndex(asset, segment.id));
   setBusy(els.generateVoiceBtn, true, "生成中");
+  state.voiceJobs.add(segmentId); renderSegmentList();
   try {
     const voice = await bridge.generateVoice({
       projectRoot: project.rootDir,
@@ -1920,6 +2026,7 @@ async function handleGenerateVoice() {
   } catch (error) {
     showToast(error.message || "生成语音失败", "error");
   } finally {
+    state.voiceJobs.delete(segmentId); renderSegmentList();
     setBusy(els.generateVoiceBtn, false);
   }
 }
@@ -2051,6 +2158,7 @@ async function handleSynthesize() {
     targetAsset.renderVersions ||= [];
     const oldRenderIds = new Set(targetAsset.renderVersions.map((item) => item.id));
     render.assetId = targetAsset.id;
+    if (existingRender?.displayNumber) render.displayNumber = existingRender.displayNumber;
     render.label = renderLabel(targetAsset, render, 0);
     if (editingRender) {
       targetAsset.renderVersions = targetAsset.renderVersions.map((item) => item.id === render.id ? render : item);
@@ -2540,6 +2648,17 @@ function updateRecordTimer() {
 }
 
 function attachEvents() {
+  attachSortable(els.assetList, { selector: '[data-asset-id]', id: card => card.dataset.assetId, commit: ids => {
+    if (!state.project) return;
+    const assets = new Map(state.project.assets.map(asset => [asset.id, asset]));
+    state.project.assets = ids.map(id => assets.get(id)).filter(Boolean);
+    saveProjectSoon(); renderAssets();
+  }});
+  attachSortable(els.mergeQueue, { selector: '[data-queue-id]', id: card => card.dataset.queueId, commit: reorderQueue });
+  for (const input of [els.textStartTime, els.textDuration]) {
+    input.addEventListener('change', updateTextTiming);
+    input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } });
+  }
   els.newProjectBtn.addEventListener("click", () => handleNewProject().catch(reportError));
   els.saveProjectBtn.addEventListener("click", () => handleSaveProjectFolder().catch(reportError));
   els.openProjectBtn.addEventListener("click", () => handleOpenProject().catch(reportError));

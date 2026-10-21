@@ -30,6 +30,7 @@ export default function StudioWorkspace({ visible, recording, onImported, onReco
       openProject: async () => { const targetRoot = await chooseDirectory("打开视频项目文件夹"); return targetRoot ? call("project:openFolder", { targetRoot }) : null; },
       openProjectFolder: (targetRoot: string) => call("project:openFolder", { targetRoot }),
       saveProject: (project: unknown) => call("project:save", project),
+      deleteSegment: (payload: MediaPayload) => call("project:deleteSegment", payload),
       saveProjectFolder: async (project: MediaPayload, options: MediaPayload = {}) => {
         const targetRoot = options.targetRoot || await chooseDirectory("将项目另存到文件夹");
         return targetRoot ? call("project:saveAsFolder", { project, targetRoot }) : null;
