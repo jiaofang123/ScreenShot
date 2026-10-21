@@ -9,7 +9,7 @@ page.on('pageerror', error => errors.push(error.message));
 await page.addInitScript(() => {
   let next = 1;
   const callbacks = new Map(), listeners = new Map();
-  window.calls = []; window.cancelSave = false;
+  window.calls = []; window.failPath = false; window.failStart = false;
   window.previousRecording = { id: 'previous-recording', mode: 'window', phase: 'saved', message: '录屏已保存', filePath: '/tmp/ScreenShot-deleted-previous.mp4', elapsedMs: 1000, bytesWritten: 1000, width: 640, height: 360 };
   window.recordStatus = window.previousRecording;
   window.statusEvent = value => {
@@ -28,7 +28,12 @@ await page.addInitScript(() => {
       if (cmd === 'native_capture_sources') return [{ id: 2, kind: 'window', name: '测试窗口', width: 640, height: 360 }];
       if (cmd === 'get_recording_status') return window.recordStatus;
       if (cmd === 'get_recording_browsers') return [{ id: 'chrome', name: 'Google Chrome' }];
-      if (cmd === 'plugin:dialog|save') return window.cancelSave ? null : '/tmp/ScreenShot-current.mp4';
+      if (cmd === 'plugin:dialog|save') return '/tmp/ScreenShot-current.mp4';
+      if (cmd === 'default_recording_path') {
+        if(window.failPath)throw new Error('测试保存目录不可用');
+        return args.projectRoot ? `${args.projectRoot}/assets/current.mp4` : `/Users/test/screenshot/${args.date}/current.mp4`;
+      }
+      if (cmd === 'toggle_studio_fullscreen') { window.fullscreen = !window.fullscreen; return; }
       if (cmd === 'studio_call') {
         if (args.method === 'app:getStatus') return { ffmpeg: { ok: true }, tts: { ok: true } };
         if (args.method === 'project:create') return { id: 'project', rootDir: '/tmp/test-project', assets: [], exports: [], mergeQueue: [] };
@@ -39,79 +44,84 @@ await page.addInitScript(() => {
         }
       }
       if (cmd === 'start_native_recording' || cmd === 'start_recording_session') {
+        if(window.failStart)throw new Error('测试录屏启动失败');
         const value = { id: `new-recording-${next++}`, mode: args.options.mode, phase: cmd === 'start_native_recording' ? 'recording' : 'waiting', browser: 'Google Chrome', message: '本次录屏已开始', elapsedMs: 0, bytesWritten: 0, width: 640, height: 360, filePath: null };
         if(cmd === 'start_recording_session')value.controllerId=value.id;
         window.statusEvent(value);
         if (window.completeBeforeReturn) window.statusEvent({ ...value, phase: 'saved', message: '录屏已保存', filePath: '/tmp/ScreenShot-current.mp4' });
         return value;
       }
+      if(cmd==='recording_control')window.statusEvent({...window.recordStatus,phase:args.action==='stop'?'saved':args.action==='pause'?'paused':'recording',message:'本次录屏已保存',filePath:args.action==='stop'?'/tmp/ScreenShot-current.mp4':null});
     },
   };
   window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener(event, id) { listeners.get(event)?.delete(id); callbacks.delete(id); } };
 });
 const importedPaths = () => page.evaluate(() => window.calls.filter(call => call.cmd === 'studio_call' && call.args.method === 'project:importVideos').flatMap(call => call.args.payload.paths));
 const settle = () => page.waitForTimeout(150);
-const assertRecorder = async () => assert.equal(await page.locator('.mode-tabs button.selected').innerText(), '录屏');
+const assertStudio = async () => assert.equal(await page.locator('.mode-tabs button.selected').innerText(), '视频制作');
 try {
   await page.goto('http://127.0.0.1:1420');
   await page.getByRole('button', { name: '视频制作', exact: true }).click();
   const editor = page.frameLocator('iframe[title="视频制作"]');
   await editor.locator('#mediaStatus').getByText('媒体组件已就绪').waitFor();
-  await editor.locator('#recordBtn').click();
-  await page.waitForFunction(() => window.calls.some(call => call.cmd === 'get_recording_status'));
-  await settle();
-  await assertRecorder(); assert.deepEqual(await importedPaths(), []);
+  await page.getByRole('button',{name:'全屏 / 退出全屏',exact:true}).click();
+  await assertStudio(); assert.deepEqual(await importedPaths(), []);
   // A repeated old completion event must also be ignored before starting a new session.
   await page.evaluate(() => window.statusEvent(window.previousRecording)); await settle();
-  await assertRecorder(); assert.deepEqual(await importedPaths(), []);
-  // Cancelling the save dialog does not authorize importing an earlier recording either.
-  await page.evaluate(() => { window.cancelSave = true; });
-  await page.getByRole('button', { name: '开始录屏', exact: true }).click();
+  await assertStudio(); assert.deepEqual(await importedPaths(), []);
+  // A failed destination must neither switch workspaces nor import an old result.
+  await page.evaluate(() => { window.failPath = true; });
+  await editor.locator('#recordBtn').click();
+  await editor.locator('#toast').getByText('测试保存目录不可用').waitFor();
   await page.evaluate(() => window.statusEvent(window.previousRecording)); await settle();
-  await assertRecorder(); assert.deepEqual(await importedPaths(), []);
-  await page.evaluate(() => { window.cancelSave = false; });
-  await page.getByRole('button', { name: '开始录屏', exact: true }).click();
-  await page.getByText('本次录屏已开始', { exact: true }).waitFor({ timeout: 10000 });
+  await assertStudio(); assert.deepEqual(await importedPaths(), []);
+  await page.evaluate(() => { window.failPath = false; });
+  const before = await page.evaluate(()=>window.calls.length);
+  await editor.locator('#recordBtn').click();
+  await page.waitForFunction(()=>window.recordStatus.controllerId);
+  const startCalls=await page.evaluate(before=>window.calls.slice(before),before);
+  assert.equal(startCalls.filter(call=>['switch_workspace','toggle_studio_fullscreen','plugin:dialog|save','native_capture_sources'].includes(call.cmd)).length,0);
+  assert.equal(startCalls.find(call=>call.cmd==='start_recording_session').args.path,'/tmp/test-project/assets/current.mp4');
+  assert.equal(await page.evaluate(()=>window.fullscreen),true);
   const current = await page.evaluate(() => ({ ...window.recordStatus }));
   await page.evaluate(() => window.statusEvent(window.previousRecording)); await settle();
-  await assertRecorder(); assert.deepEqual(await importedPaths(), []);
+  await assertStudio(); assert.deepEqual(await importedPaths(), []);
   await page.evaluate(current => window.statusEvent({ ...current, phase: 'saved', message: '录屏已保存', filePath: '/tmp/ScreenShot-current.mp4' }), current);
   await editor.locator('#assetCount').getByText('1', { exact: true }).waitFor();
   assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4']);
-  // Reopening after a successful capture must not import that capture a second time.
-  await editor.locator('#recordBtn').click(); await settle(); await assertRecorder();
+  // Duplicate events and a continued controller round each import at most once.
+  await page.evaluate(current=>window.statusEvent({...current,phase:'saved',filePath:'/tmp/ScreenShot-current.mp4'}),current);await settle();
   assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4']);
-  await page.getByRole('radio', { name: /浏览器页签/ }).check();
-  await page.getByRole('button', { name: '开始录屏', exact: true }).click();
-  await page.getByRole('button', { name: '取消录屏', exact: true }).waitFor();
-  const tab = await page.evaluate(() => ({ ...window.recordStatus }));
-  await page.evaluate(() => window.statusEvent(window.previousRecording)); await settle(); await assertRecorder();
+  const tab = {...current,id:'continued-tab',controllerId:current.id,mode:'tab',phase:'recording'};
+  await page.evaluate(tab=>window.statusEvent(tab),tab);
+  await page.evaluate(() => window.statusEvent(window.previousRecording)); await settle(); await assertStudio();
   await page.evaluate(tab => window.statusEvent({ ...tab, phase: 'saved', message: '录屏已保存', filePath: '/tmp/ScreenShot-new-tab.mp4' }), tab);
   await editor.locator('#assetCount').getByText('2', { exact: true }).waitFor();
   assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4', '/tmp/ScreenShot-new-tab.mp4']);
   // A very short recording may finish before its start RPC resolves, and may reuse a saved path.
-  await editor.locator('#recordBtn').click(); await settle(); await assertRecorder();
   await page.evaluate(() => { window.completeBeforeReturn = true; });
-  await page.getByRole('button', { name: '开始录屏', exact: true }).click();
+  await editor.locator('#recordBtn').click();
   await editor.locator('#assetCount').getByText('3', { exact: true }).waitFor({ timeout: 10000 });
   assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4', '/tmp/ScreenShot-new-tab.mp4', '/tmp/ScreenShot-current.mp4']);
-  // Repeated rounds from an owned browser controller can use new recording IDs.
-  await page.getByRole('button',{name:'录屏',exact:true}).click();
-  await page.getByRole('radio',{name:/浏览器页签/}).check();
+  // Cancelled/failed browser setup cannot import an earlier completion.
   await page.evaluate(()=>{window.completeBeforeReturn=false;});
-  await page.getByRole('button',{name:'开始录屏',exact:true}).click();
-  await page.getByRole('button',{name:'取消录屏',exact:true}).waitFor();
-  const root=await page.evaluate(()=>({...window.recordStatus}));
-  await page.evaluate(root=>window.statusEvent({...root,phase:'saved',message:'第一段已保存',filePath:'/tmp/controller-first.mp4'}),root);
-  await page.getByText('第一段已保存',{exact:true}).waitFor();
-  const next={...root,id:'controller-second',controllerId:root.id,phase:'recording',message:'正在录制第二段'};
-  await page.evaluate(next=>window.statusEvent(next),next);
-  await page.getByText('正在录制第二段',{exact:true}).waitFor();
+  await editor.locator('#recordBtn').click();await settle();
+  await page.evaluate(()=>window.statusEvent({...window.recordStatus,phase:'cancelled',filePath:null}));
+  await page.evaluate(()=>{window.failStart=true;});
+  await editor.locator('#recordBtn').click();await editor.locator('#toast').getByText('测试录屏启动失败').waitFor();
   await page.evaluate(()=>window.statusEvent(window.previousRecording));await settle();
-  await page.getByText('正在录制第二段',{exact:true}).waitFor();
-  await page.evaluate(next=>window.statusEvent({...next,phase:'saved',message:'第二段已保存',filePath:'/tmp/controller-second.mp4'}),next);
-  await page.getByText('第二段已保存',{exact:true}).waitFor();
-  assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4', '/tmp/ScreenShot-new-tab.mp4', '/tmp/ScreenShot-current.mp4']);
+  assert.equal((await importedPaths()).length,3);await assertStudio();
+  await page.evaluate(()=>{window.failStart=false;window.statusEvent({...window.recordStatus,phase:'cancelled',filePath:null});});
+  // Standalone native recording uses a daily default, without auto-importing.
+  await page.getByRole('button',{name:'录屏',exact:true}).click();
+  await page.getByRole('button',{name:'开始录屏',exact:true}).click();
+  await page.getByText('本次录屏已开始',{exact:true}).waitFor({timeout:10000});
+  const native=await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_native_recording'));
+  assert.match(native.args.path,/^\/Users\/test\/screenshot\/\d{4}-\d{2}-\d{2}\/current.mp4$/);
+  await page.getByRole('button',{name:'停止并保存',exact:true}).click();await settle();
+  assert.equal(await page.locator('.mode-tabs button.selected').innerText(),'录屏');
+  assert.equal((await importedPaths()).length,3);
+  assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.cmd==='plugin:dialog|save').length),0);
   assert.deepEqual(errors, []);
-  console.log('PASS: stale/deleted snapshot, stale events, cancelled start, native/tab ownership, fast completion, repeated file path, controller continuation, single import per recording');
+  console.log('PASS: studio opens controller directly, fullscreen retained, no save dialog, project/daily paths, stale/deleted protection, failed/cancelled start, fast completion, continuation ownership, single import');
 } finally { await browser.close(); }

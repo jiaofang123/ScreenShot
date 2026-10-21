@@ -461,6 +461,71 @@ impl Drop for RecordingManager {
     }
 }
 
+fn valid_recording_date(date: &str) -> bool {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = date[..4].parse::<u32>().unwrap_or(0);
+    let month = date[5..7].parse::<u32>().unwrap_or(0);
+    let day = date[8..].parse::<u32>().unwrap_or(0);
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => 0,
+    };
+    year >= 1970 && day > 0 && day <= days
+}
+
+fn recording_destination(
+    root: &Path,
+    project: Option<&Path>,
+    date: &str,
+) -> Result<PathBuf, String> {
+    if !root.is_absolute() || !valid_recording_date(date) {
+        return Err("录屏保存目录或日期无效".into());
+    }
+    let directory = if let Some(project) = project {
+        if !project.is_absolute() || !project.join("project.json").is_file() {
+            return Err("视频项目不存在，请先创建或打开项目".into());
+        }
+        project.join("assets")
+    } else {
+        root.join(date)
+    };
+    std::fs::create_dir_all(&directory).map_err(|e| format!("无法创建录屏保存目录：{e}"))?;
+    Ok(directory.join(format!("{}.mp4", Uuid::new_v4())))
+}
+
+#[tauri::command]
+pub fn default_recording_path(
+    app: AppHandle,
+    project_root: Option<String>,
+    date: String,
+) -> Result<String, String> {
+    recording_destination(
+        &crate::studio::workspace_root(&app)?,
+        project_root.as_deref().map(Path::new),
+        &date,
+    )
+    .map(|path| path.to_string_lossy().into_owned())
+}
+
 fn websocket_worker(listener: TcpListener, session: Arc<Session>, origin: String, prefix: String) {
     loop {
         let mut connection = None;
@@ -875,12 +940,28 @@ fn handle_request(
             {
                 return Err("请先停止并等待当前录制保存完成".into());
             }
-            let options: RecordingOptions = serde_json::from_slice(&body(&mut request, 4096)?)
+            let data: serde_json::Value = serde_json::from_slice(&body(&mut request, 4096)?)
                 .map_err(|error| error.to_string())?;
+            let options: RecordingOptions =
+                serde_json::from_value(data.clone()).map_err(|error| error.to_string())?;
             if !matches!(options.fps, 15 | 30 | 60) {
                 return Err("帧率无效".into());
             }
-            let path = if current.phase == "waiting" && output.mime.is_none() {
+            // An open standalone controller can continue across midnight. Project
+            // recordings and explicitly selected paths stay in their own folder.
+            let daily_root = app
+                .and_then(|app| crate::studio::workspace_root(app).ok())
+                .filter(|root| {
+                    base_path.parent().and_then(Path::parent) == Some(root.as_path())
+                        && base_path
+                            .parent()
+                            .and_then(Path::file_name)
+                            .and_then(|value| value.to_str())
+                            .is_some_and(valid_recording_date)
+                });
+            let path = if let (Some(root), Some(date)) = (daily_root, data["date"].as_str()) {
+                recording_destination(&root, None, date)?
+            } else if current.phase == "waiting" && output.mime.is_none() {
                 output.requested.clone()
             } else {
                 next_recording_path(base_path)
@@ -1545,6 +1626,35 @@ pub fn reveal_recording(state: State<'_, RecordingManager>) -> Result<(), String
 mod tests {
     use super::*;
     use std::{fs, net::TcpStream};
+
+    #[test]
+    fn recording_paths_use_daily_folders_or_existing_project_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screenshot");
+        let first = recording_destination(&root, None, "2026-10-21").unwrap();
+        let second = recording_destination(&root, None, "2026-10-21").unwrap();
+        assert_eq!(first.parent(), Some(root.join("2026-10-21").as_path()));
+        assert_ne!(first, second);
+        assert!(!first.exists());
+        let tomorrow = recording_destination(&root, None, "2026-10-22").unwrap();
+        assert_eq!(tomorrow.parent(), Some(root.join("2026-10-22").as_path()));
+        for date in [
+            "../escape",
+            "2026-02-29",
+            "2026-13-01",
+            "2026-10-00",
+            "é026-10-21",
+        ] {
+            assert!(recording_destination(&root, None, date).is_err());
+        }
+        assert!(recording_destination(&root, None, "2028-02-29").is_ok());
+        let project = directory.path().join("existing-project");
+        assert!(recording_destination(&root, Some(&project), "2026-10-21").is_err());
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("project.json"), "{}").unwrap();
+        let path = recording_destination(&root, Some(&project), "2026-10-21").unwrap();
+        assert_eq!(path.parent(), Some(project.join("assets").as_path()));
+    }
 
     fn options(mode: RecordingMode) -> RecordingOptions {
         RecordingOptions {

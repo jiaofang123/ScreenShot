@@ -3,8 +3,9 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 type MediaPayload = Record<string, unknown>;
+export type StudioRecording = { path: string; projectRoot?: string };
 export default function StudioWorkspace({ visible, recording, onImported, onRecord, onNotify }: {
-  visible: boolean; recording: string | null; onImported: () => void; onRecord: () => void; onNotify: (message: string) => void;
+  visible: boolean; recording: StudioRecording | null; onImported: () => void; onRecord: (project: { projectRoot: string }) => Promise<void>; onNotify: (message: string) => void;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
@@ -22,7 +23,8 @@ export default function StudioWorkspace({ visible, recording, onImported, onReco
       mediaUrl: (path: string) => convertFileSrc(path),
       createProject: (payload: MediaPayload) => call("project:create", payload),
       createProjectDialog: async () => {
-        const targetRoot = await save({ title: "创建视频项目文件夹", defaultPath: `视频项目-${new Date().toLocaleString("sv-SE").replace(/[ :]/g, "-")}` });
+        const defaultPath = await call("project:defaultPath") as string;
+        const targetRoot = await save({ title: "创建视频项目文件夹", defaultPath });
         return targetRoot ? call("project:create", { targetRoot }) : null;
       },
       openProject: async () => { const targetRoot = await chooseDirectory("打开视频项目文件夹"); return targetRoot ? call("project:openFolder", { targetRoot }) : null; },
@@ -54,8 +56,8 @@ export default function StudioWorkspace({ visible, recording, onImported, onReco
   }, [onRecord]);
   useEffect(() => {
     if (!recording || !initialized) return;
-    const target = frame.current?.contentWindow as (Window & { importRecording?: (path: string) => Promise<void> }) | null;
-    if (target?.importRecording) void target.importRecording(recording).then(onImported).catch(error => { onNotify(String(error)); onImported(); });
+    const target = frame.current?.contentWindow as (Window & { importRecording?: (path: string, projectRoot?: string) => Promise<void> }) | null;
+    if (target?.importRecording) void target.importRecording(recording.path, recording.projectRoot).then(onImported).catch(error => { onNotify(String(error)); onImported(); });
   }, [recording, initialized, onImported, onNotify]);
   return <section className="studio-workspace" hidden={!visible} aria-label="视频制作工作区">
     {ready && <iframe ref={frame} title="视频制作" src="/studio/index.html" />}

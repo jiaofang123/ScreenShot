@@ -36,6 +36,7 @@ await context.exposeFunction('testInvoke', (cmd, args = {}) => {
   }
   if (cmd === 'cancel_capture') { pending?.(null); pending = null; }
   if (cmd === 'plugin:dialog|save') return '/tmp/ScreenShot-region.mp4';
+  if (cmd === 'default_recording_path') return '/tmp/ScreenShot-region.mp4';
   if (cmd === 'start_native_recording') return { id: 'region-recording', mode: 'region', phase: 'recording', message: '区域录屏已开始', filePath: null, elapsedMs: 0, bytesWritten: 0, width: 720, height: 540 };
 });
 await context.addInitScript(() => {

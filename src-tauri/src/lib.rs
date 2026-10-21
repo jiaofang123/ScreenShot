@@ -255,6 +255,7 @@ pub fn run() {
             default_shortcut,
             recording::get_recording_status,
             recording::get_recording_browsers,
+            recording::default_recording_path,
             recording::start_recording_session,
             recording::recording_control,
             recording::reopen_recording_browser,

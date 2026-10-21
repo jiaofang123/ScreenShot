@@ -2131,7 +2131,15 @@ async function handleMergePreview() {
 }
 
 async function openRecordDialog() {
-  if (bridge.requestRecording) { bridge.requestRecording(); return; }
+  if (bridge.requestRecording) {
+    if (els.recordBtn.disabled) return;
+    setBusy(els.recordBtn, true, "打开设置中");
+    try {
+      const project = await ensureProject();
+      if (project) await bridge.requestRecording({ projectRoot: project.rootDir });
+    } finally { setBusy(els.recordBtn, false); }
+    return;
+  }
   await ensureProject();
   els.recordDialog.showModal();
   try {
@@ -2606,10 +2614,11 @@ async function init() {
   const previous = localStorage.getItem('screenshot-studio-last-project');
   if (previous) { try { state.project = await bridge.openProjectFolder(previous); if (state.project) resetSelectionForProject(state.project); } catch {} }
   renderAll();
-  window.importRecording = async path => {
+  window.importRecording = async (path, projectRoot) => {
     const project = await ensureProject();
     if (!project) throw new Error('请先创建视频项目，录屏仍保存在原位置');
-    const assets = await bridge.importVideos({ projectRoot: project.rootDir, paths: [path] });
+    if (projectRoot && project.rootDir !== projectRoot) throw new Error(`录屏已保存在原项目 ${projectRoot}，请打开该项目后导入；当前项目已切换。`);
+    const assets = await bridge.importVideos({ projectRoot: project.rootDir, paths: [path], recording: true });
     for (const asset of assets) { asset.kind = 'recording'; project.assets.push(asset); }
     if (assets[0]) { state.selectedAssetId = assets[0].id; ensureDefaultSegment(assets[0], true); }
     await saveProjectNow(); renderAll(); showToast('录屏已添加到视频素材');

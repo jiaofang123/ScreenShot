@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir, homedir } from 'node:os';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 assert.equal(process.env.SCREENSHOT_REAL_CAPTURE,'1','Set SCREENSHOT_REAL_CAPTURE=1 to explicitly enable real screen recording');
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
@@ -14,10 +14,23 @@ const helper=process.env.SCREENSHOT_NATIVE_HELPER||join(root,'src-tauri/resource
 const ffmpeg=join(root,'src-tauri/studio/node_modules/ffmpeg-static/ffmpeg');
 const directory=await mkdtemp(join(tmpdir(),'ScreenShot-real-acceptance-'));
 const title=`NativeCapture-QA-${Date.now()}`;
+const date=new Date(),day=`${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+const workerPath=process.env.STUDIO_WORKER||join(root,'src-tauri/studio/worker.mjs');
+function mediaCall(method,payload={}) {
+  const result=JSON.parse(execFileSync(process.execPath,[workerPath],{encoding:'utf8',input:JSON.stringify({method,payload})+'\n'}));
+  assert.equal(result.ok,true,JSON.stringify(result));return result.result;
+}
+const project=mediaCall('project:create',{name:'录屏路径真机验收'});
 const browser=await chromium.launch({headless:false,executablePath:process.env.RECORDING_CHROME_PATH||'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',args:['--window-position=0,25','--window-size=1700,1050',`--auto-select-tab-capture-source-by-title=${title}`]});
 let child, lines, stderr='';const results=[],responses=[];
 const context=await browser.newContext({viewport:null});
 const fixture=await context.newPage();
+async function command(value){
+  const before=responses.length;child.stdin.write((typeof value==='string'?value:JSON.stringify(value))+'\n');
+  const deadline=Date.now()+25000;
+  while(responses.length===before){assert.ok(child.exitCode===null&&Date.now()<deadline,'Hardware harness command timed out: '+stderr);await new Promise(resolve=>setTimeout(resolve,50));}
+  return responses.at(-1);
+}
 async function config(url){return fetch(new URL('config',url)).then(response=>response.json());}
 async function waitStatus(url,phase){
   const until=Date.now()+20000;
@@ -45,7 +58,12 @@ try{
   child.stderr.on('data',bytes=>stderr+=bytes);
   lines=createInterface({input:child.stdout});let first;
   const ready=new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Harness startup timed out: '+stderr)),20000);lines.on('line',line=>{try{const value=JSON.parse(line);if(value.url&&!first){first=value;clearTimeout(timer);resolve(value);}else responses.push(value);}catch{}});child.once('exit',code=>{if(!first){clearTimeout(timer);reject(Error('Harness exited '+code+': '+stderr));}});});
-  const {url}=await ready;
+  const initial=await ready;
+  await command('cancel');await waitStatus(initial.url,'cancelled');
+  const destination=await command({destination:{projectRoot:project.rootDir,date:day}});
+  assert.equal(destination.ok,true,JSON.stringify(destination));assert.equal(dirname(destination.status.path),join(project.rootDir,'assets'));
+  const prepared=await command({prepare:true,path:destination.status.path,options:{mode:'window',fps:30,audio:true,originalResolution:false,browser:'chrome'}});
+  assert.equal(prepared.ok,true,JSON.stringify(prepared));const {url}=prepared.status;
   const popup=context.waitForEvent('page');await fixture.evaluate(()=>window.open('about:blank','native-controller','popup,width=650,height=500,left=100,top=200'));
   const page=await popup;page.setDefaultTimeout(10000);
   const pageErrors=[];page.on('pageerror',error=>pageErrors.push(error.message));
@@ -70,6 +88,7 @@ try{
     await page.locator('#stop').click();const saved=await waitStatus(url,'saved');
     await page.getByRole('heading',{name:'视频已保存',exact:true}).waitFor();
     const result=await inspect(saved.filePath);
+    assert.equal(dirname(saved.filePath),join(project.rootDir,'assets'));
     if(mode!=='tab')assert.equal(result.audio,true);
     assert.equal(result.audio,saved.hasAudio);
     assert.ok(!results.some(previous=>previous.path===result.path));results.push({mode,...result});
@@ -83,19 +102,22 @@ try{
   while(responses.length===invalidBefore){await new Promise(resolve=>setTimeout(resolve,50));}
   assert.equal(responses.at(-1).ok,false);assert.match(responses.at(-1).error,/窗口已关闭/);
   assert.equal(await stat(join(directory,'invalid.mp4')).then(()=>true,()=>false),false);
-  const before=responses.length;
-  child.stdin.write(JSON.stringify({options:{mode:'window',fps:30,audio:true,originalResolution:false},source:{sourceId:target.id,name:target.name,cursor:false},path:join(directory,'direct.mp4')})+'\n');
-  while(responses.length===before){await new Promise(resolve=>setTimeout(resolve,50));}
-  assert.equal(responses.at(-1).ok,true,JSON.stringify(responses.at(-1)));assert.equal(responses.at(-1).status.phase,'recording');
+  const daily=await command({destination:{projectRoot:null,date:day}});assert.equal(daily.ok,true,JSON.stringify(daily));
+  const directPath=daily.status.path;assert.equal(dirname(directPath),join(homedir(),'screenshot',day));
+  const direct=await command({options:{mode:'window',fps:30,audio:true,originalResolution:false},source:{sourceId:target.id,name:target.name,cursor:false},path:directPath});
+  assert.equal(direct.ok,true,JSON.stringify(direct));assert.equal(direct.status.phase,'recording');
   await new Promise(resolve=>setTimeout(resolve,1700));child.stdin.write('stop\n');
-  for(let tries=0;tries<100;tries++){if(await stat(join(directory,'direct.mp4')).catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,100));}
-  results.push({mode:'direct-main-command',...await inspect(join(directory,'direct.mp4'))});
+  for(let tries=0;tries<100;tries++){if(await stat(directPath).catch(()=>null))break;await new Promise(resolve=>setTimeout(resolve,100));}
+  results.push({mode:'direct-main-command',...await inspect(directPath)});
+  project.assets=mediaCall('project:importVideos',{projectRoot:project.rootDir,paths:results.slice(0,5).map(result=>result.path),recording:true});
+  assert.deepEqual(project.assets.map(asset=>asset.path),results.slice(0,5).map(result=>result.path));
+  mediaCall('project:save',project);
   // Snapshot backing pixels must match the display dimensions used by region selection.
   const display=sources.find(source=>source.kind==='desktop');const snapshot=join(directory,'desktop-selection.png');
   execFileSync(helper,['snapshot',String(display.id),snapshot,String(child.pid)]);
   const png=await readFile(snapshot);assert.equal(png.readUInt32BE(16),display.width);assert.equal(png.readUInt32BE(20),display.height);
   assert.deepEqual(pageErrors,[]);
-  const report={result:'PASS',directory,results,snapshot:{width:display.width,height:display.height}};
+  const report={result:'PASS',directory,projectRoot:project.rootDir,results,snapshot:{width:display.width,height:display.height}};
   await writeFile(join(directory,'results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 }catch(error){console.error('Native hardware test failed:',error,'\n',stderr);throw error;}
 finally{

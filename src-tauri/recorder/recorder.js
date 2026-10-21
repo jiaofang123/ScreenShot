@@ -194,7 +194,9 @@ function syncNativeStatus(status) {
 async function prepareRound() {
   const wanted = readOptions();
   if (phase === 'waiting' && Object.entries(wanted).every(([key,value]) => config.options[key] === value)) return;
-  const result = await api('restart', wanted);
+  const date = new Date();
+  const day = `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`;
+  const result = await api('restart', { ...wanted, date:day });
   config.options = wanted; config.status = result.status;
   recorder = null; finishing = false; cancelled = false; stopRequested = false;
   startedAt = endedAt = pauseStarted = pausedMs = lastFlush = nextSequence = pendingBytes = 0;

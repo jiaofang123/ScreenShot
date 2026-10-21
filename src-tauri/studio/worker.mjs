@@ -13,7 +13,6 @@ const APP_ROOT = resolve(__dirname, '..');
 const OUTPUT_VIDEO_WIDTH = 1920, DEFAULT_TEXT_PREVIEW_WIDTH = 960;
 const TEXT_OVERLAY_PLACEHOLDER = '输入文字', TEXT_OVERLAY_DEFAULT_DURATION = 2;
 const TEXT_OVERLAY_FONT_SIZES = [12,14,16,20,24,30,36,45];
-const app = { getPath: () => process.env.SCREENSHOT_DOCUMENTS || os.homedir() };
 const handlers = new Map();
 const ipcMain = { handle: (name, handler) => handlers.set(name, handler) };
 let requestPayload = {};
@@ -71,7 +70,7 @@ async function ensureDir(dir) {
 }
 
 function workspaceRoot() {
-  return process.env.SCREENSHOT_STUDIO_WORKSPACE || join(app.getPath("documents"), "ScreenShot", "视频项目");
+  return process.env.SCREENSHOT_STUDIO_WORKSPACE || join(os.homedir(), "screenshot");
 }
 
 function projectsRoot() {
@@ -724,6 +723,9 @@ async function generateVoiceWithWindowsSapi(values) {
   ipcMain.handle("project:create", async (_event, payload = {}) => {
     return createProject(payload.name, payload.targetRoot || null);
   });
+  ipcMain.handle("project:defaultPath", async () => {
+    return join(await ensureDir(projectsRoot()), projectFolderName());
+  });
   ipcMain.handle("project:openFolder", async (_event, payload = {}) => {
     return openProjectFolder(payload.targetRoot);
   });
@@ -756,12 +758,17 @@ async function generateVoiceWithWindowsSapi(values) {
     const assetsDir = await ensureDir(assetSubdir(payload.projectRoot, "assets"));
     const imported = [];
     for (const file of result.filePaths) {
-      const id = randomUUID();
-      const target = join(assetsDir, `${id}${extname(file) || ".mp4"}`);
-      await copyFile(file, target);
+      // Recordings already saved in this project's assets are registered in
+      // place, as in Narration Studio. External videos still get their own copy.
+      const inPlace = payload.recording === true && resolve(dirname(file)) === resolve(assetsDir);
+      const id = inPlace ? basename(file, extname(file)) : randomUUID();
+      const target = inPlace ? file : join(assetsDir, `${id}${extname(file) || ".mp4"}`);
+      if (inPlace) {
+        if (!(await stat(file)).isFile()) throw new Error("录屏视频不存在或尚未保存完成。");
+      } else await copyFile(file, target);
       imported.push({
         id,
-        kind: "imported",
+        kind: payload.recording === true ? "recording" : "imported",
         name: safeFileName(file),
         sourcePath: file,
         path: target,

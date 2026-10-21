@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { recordingPath } from "../recordingPaths";
 
 type RecordingMode = "window" | "tab" | "desktop" | "region";
 interface RecordingStatus {
@@ -58,8 +58,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
     if (busy || active) return;
     setBusy(true);
     try {
-      const path = await save({ title: "录屏视频保存位置", defaultPath: `ScreenShot-录屏-${new Date().toLocaleString("sv-SE").replace(/[ :]/g, "-")}.mp4`, filters: [{ name: "视频", extensions: ["mp4", "webm"] }] });
-      if (!path) return;
+      const path = await recordingPath();
       controller.current=null;onRecordingPreparing?.();
       const value = await invoke<RecordingStatus>("start_recording_session", { path, options: { mode, fps, audio, originalResolution, browser } });
       controller.current=value.controllerId||value.id;
@@ -79,7 +78,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
   return (
     <section className="recording-panel">
       <div className="recording-heading"><div><span className="eyebrow">SCREEN RECORDING</span><h2>录下需要的内容</h2></div><span className={`recording-badge ${active ? "active" : ""}`}>{status ? labels[status.phase] : "准备录制"}</span></div>
-      <p className="recording-intro">选择录制范围，在浏览器共享面板授权后开始。优先使用本机 Chrome / Edge，视频直接保存到你选择的位置。</p>
+      <p className="recording-intro">选择录制范围，在浏览器共享面板授权后开始。视频自动保存到用户目录下的 screenshot / 日期文件夹。</p>
       <fieldset className="recording-sources" hidden disabled={active || busy}>
         <legend>录制来源</legend>
         {modes.map(item => <label key={item.value} className={`recording-source ${mode === item.value ? "selected" : ""}`}>

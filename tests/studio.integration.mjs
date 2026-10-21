@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { mkdtemp, readFile, stat, rename } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, rename, copyFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -21,11 +21,20 @@ const probe=path=>{try{execFileSync(ffmpeg,['-hide_banner','-i',path],{stdio:['i
 try {
   assert.equal((await call('app:getStatus')).ffmpeg.ok,true);
   const project=await call('project:create',{name:'整合测试'});
+  assert.match(project.rootDir,new RegExp('/projects/合成视频-\\d{4}年\\d{2}月\\d{2}日\\d{2}时\\d{2}分\\d{2}秒(?:-\\d+)?$'));
+  for(const name of ['assets','voices','renders','exports','tmp'])assert.ok((await stat(join(project.rootDir,name))).isDirectory());
+  assert.match(await call('project:defaultPath'),new RegExp('/projects/合成视频-\\d{4}年'));
   const red=join(directory,'red.mp4'),blue=join(directory,'blue.mp4');
   run(['-f','lavfi','-i','color=red:size=320x180:rate=30:duration=3','-f','lavfi','-i','sine=frequency=220:duration=3','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',red]);
   run(['-f','lavfi','-i','color=blue:size=240x160:rate=24:duration=2','-c:v','libx264','-pix_fmt','yuv420p',blue]);
   project.assets=await call('project:importVideos',{projectRoot:project.rootDir,paths:[red,blue]});
   assert.equal(project.assets.length,2);
+  const recorded=join(project.rootDir,'assets','test-recording.mp4');await copyFile(red,recorded);
+  const before=await readdir(join(project.rootDir,'assets'));
+  const importedRecording=await call('project:importVideos',{projectRoot:project.rootDir,paths:[recorded],recording:true});
+  assert.equal(importedRecording[0].path,recorded);assert.equal(importedRecording[0].kind,'recording');
+  assert.deepEqual(await readdir(join(project.rootDir,'assets')),before);
+  await assert.rejects(call('project:importVideos',{projectRoot:project.rootDir,paths:[join(project.rootDir,'assets','missing.mp4')],recording:true}));
   const asset=project.assets[0], sourceHash=await hash(asset.path);
   const voice=await call('tts:generate',{projectRoot:project.rootDir,segmentId:'segment-test',text:'这是第一段测试旁白。',speed:'normal',provider:'local'});
   assert.ok((await stat(voice.path)).size>1000);

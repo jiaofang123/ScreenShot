@@ -13,6 +13,7 @@ use tauri::{path::BaseDirectory, AppHandle, Manager, PhysicalPosition, PhysicalS
 const METHODS: &[&str] = &[
     "app:getStatus",
     "project:create",
+    "project:defaultPath",
     "project:openFolder",
     "project:saveAsFolder",
     "project:save",
@@ -57,6 +58,14 @@ pub fn resource(app: &AppHandle, name: &str) -> PathBuf {
     }
 }
 
+pub fn workspace_root(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .home_dir()
+        .map_err(|e| e.to_string())?
+        .join("screenshot"))
+}
+
 fn launch_worker(app: &AppHandle) -> Result<MediaWorker, String> {
     let node = resource(
         app,
@@ -69,13 +78,12 @@ fn launch_worker(app: &AppHandle) -> Result<MediaWorker, String> {
     if !node.is_file() {
         return Err("视频处理运行时尚未准备，请运行 npm run media:prepare 后重新打包".into());
     }
-    let documents = app.path().document_dir().map_err(|e| e.to_string())?;
     let mut command = Command::new(node);
     command
         .arg(resource(app, "studio/worker.mjs"))
         .env_remove("NODE_OPTIONS")
         .env_remove("NODE_PATH")
-        .env("SCREENSHOT_DOCUMENTS", &documents)
+        .env("SCREENSHOT_STUDIO_WORKSPACE", workspace_root(app)?)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());

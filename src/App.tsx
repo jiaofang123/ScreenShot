@@ -1,10 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import AnnotationEditor from "./components/AnnotationEditor";
 import RecordingPanel from "./components/RecordingPanel";
-import StudioWorkspace from "./components/StudioWorkspace";
+import StudioWorkspace, { type StudioRecording } from "./components/StudioWorkspace";
+import { recordingPath } from "./recordingPaths";
 import type { CapturePayload, LongCaptureStatus } from "./types";
+
+type RecordingStatus = { id: string; controllerId?: string; phase: string; filePath: string | null };
 
 function App() {
   const [capture, setCapture] = useState<CapturePayload | null>(null);
@@ -14,17 +17,45 @@ function App() {
   const [longStatus, setLongStatus] = useState<LongCaptureStatus | null>(null);
   const [page, setPage] = useState<"capture" | "record" | "studio">("capture");
   const [studioOpened, setStudioOpened] = useState(false);
-  const [studioRecording, setStudioRecording] = useState<string | null>(null);
-  const [recordingForStudio, setRecordingForStudio] = useState(false);
+  const [studioRecording, setStudioRecording] = useState<StudioRecording | null>(null);
+  const studioController = useRef<string | null>(null), studioProject = useRef<string | undefined>(undefined);
+  const preparingRecording = useRef(false), latestRecording = useRef<RecordingStatus | null>(null);
+  const importedSessions = useRef(new Set<string>());
   const switchPage = useCallback((next: "capture" | "record" | "studio") => {
     void invoke("switch_workspace", { editing: next === "studio" }).then(() => {
       if (next === "studio") setStudioOpened(true);
       setPage(next);
     }).catch(error => setMessage(`切换工作区失败：${String(error)}`));
   }, []);
-  const requestRecording = useCallback(() => { setRecordingForStudio(true); switchPage("record"); }, [switchPage]);
-  const recordingToStudio = useCallback((path: string) => { setStudioRecording(path); switchPage("studio"); }, [switchPage]);
-  const importedRecording = useCallback(() => { setStudioRecording(null); setRecordingForStudio(false); }, []);
+  const recordingToStudio = useCallback((path: string) => { setStudioRecording({ path }); switchPage("studio"); }, [switchPage]);
+  const importedRecording = useCallback(() => { setStudioRecording(null); }, []);
+  const studioStatus = useCallback((value: RecordingStatus) => {
+    if (preparingRecording.current) latestRecording.current = value;
+    if (!studioController.current || (value.id !== studioController.current && value.controllerId !== studioController.current)) return;
+    if (value.phase === "saved" && value.filePath && !importedSessions.current.has(value.id)) {
+      importedSessions.current.add(value.id);
+      setStudioRecording({ path: value.filePath, projectRoot: studioProject.current });
+      switchPage("studio");
+    }
+  }, [switchPage]);
+  useEffect(() => {
+    const unlisten = listen<RecordingStatus>("recording-status", ({ payload }) => studioStatus(payload));
+    return () => { void unlisten.then(off => off()); };
+  }, [studioStatus]);
+  const requestRecording = useCallback(async ({ projectRoot }: { projectRoot: string }) => {
+    if (preparingRecording.current) return;
+    preparingRecording.current = true;
+    try {
+      const path = await recordingPath(projectRoot);
+      const status = await invoke<RecordingStatus>("start_recording_session", {
+        path, options: { mode: "window", fps: 30, audio: true, originalResolution: false, browser: "auto" },
+      });
+      studioController.current = status.controllerId || status.id;
+      studioProject.current = projectRoot;
+      const latest = latestRecording.current;
+      studioStatus(latest && (latest.id === studioController.current || latest.controllerId === studioController.current) ? latest : status);
+    } finally { preparingRecording.current = false; latestRecording.current = null; }
+  }, [studioStatus]);
 
   useEffect(() => {
     invoke<string>("default_shortcut")
@@ -108,13 +139,13 @@ function App() {
 
       <nav className="mode-tabs" aria-label="工具模式">
         <button className={page === "capture" ? "selected" : ""} onClick={() => switchPage("capture")}>截图</button>
-        <button className={page === "record" ? "selected" : ""} onClick={() => { setRecordingForStudio(false); switchPage("record"); }}>录屏</button>
+        <button className={page === "record" ? "selected" : ""} onClick={() => switchPage("record")}>录屏</button>
         <button className={page === "studio" ? "selected" : ""} onClick={() => switchPage("studio")}>视频制作</button>
         {page === "studio" && <button onClick={() => { void invoke("toggle_studio_fullscreen").catch(error => setMessage(String(error))); }}>全屏 / 退出全屏</button>}
       </nav>
 
       {studioOpened && <StudioWorkspace visible={page === "studio"} recording={studioRecording} onImported={importedRecording} onRecord={requestRecording} onNotify={setMessage} />}
-      {page === "record" ? <RecordingPanel onNotify={setMessage} onEditVideo={recordingToStudio} defaultEditAfter={recordingForStudio} /> : page === "capture" ? <>
+      {page === "record" ? <RecordingPanel onNotify={setMessage} onEditVideo={recordingToStudio} /> : page === "capture" ? <>
 
       <section className="hero-card">
         <div className="hero-copy">

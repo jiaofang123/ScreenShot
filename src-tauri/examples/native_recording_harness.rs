@@ -77,14 +77,23 @@ fn main() {
                     }
                     let result = if line.starts_with('{') {
                         let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-                        manager
+                        if let Some(destination) = value.get("destination") {
+                            recording::default_recording_path(app.clone(), destination["projectRoot"].as_str().map(str::to_owned), destination["date"].as_str().unwrap().into())
+                                .map(|path| serde_json::json!({"path":path}))
+                        } else if value["prepare"] == true {
+                            manager.prepare_with_app(
+                                serde_json::from_value(value["options"].clone()).unwrap(),
+                                PathBuf::from(value["path"].as_str().unwrap()),
+                                "Hardware integration".into(), Arc::new(|_| {}), Some(app.clone()),
+                            ).map(|value| serde_json::json!({"url":value.url,"status":value.status}))
+                        } else { manager
                             .start_native(
                                 app.clone(),
                                 serde_json::from_value(value["options"].clone()).unwrap(),
                                 value["source"].clone(),
                                 PathBuf::from(value["path"].as_str().unwrap()),
                             )
-                            .map(|status| serde_json::json!(status))
+                            .map(|status| serde_json::json!(status)) }
                     } else {
                         manager
                             .control(&line)

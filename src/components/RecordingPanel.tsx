@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { save } from "@tauri-apps/plugin-dialog";
+import { recordingPath } from "../recordingPaths";
 import BrowserRecordingPanel from "./BrowserRecordingPanel";
 
 type Mode = "window" | "tab" | "desktop" | "region";
@@ -74,8 +74,7 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
     if(locked||!source||(mode==='region'&&(!crop||crop.width*source.width<8||crop.height*source.height<8)))return;
     setBusy(true);setError('');
     try{
-      const path=await save({title:'录屏视频保存位置',defaultPath:`ScreenShot-录屏-${new Date().toLocaleString('sv-SE').replace(/[ :]/g,'-')}.mp4`,filters:[{name:'MP4 视频',extensions:['mp4']}]});
-      if(!path)return;
+      const path=await recordingPath();
       for(let remaining=3;remaining>0;remaining--){setCountdown(remaining);await new Promise(resolve=>setTimeout(resolve,1000));}
       editAfterRef.current=editAfter;
       startedSession.current=null;latestStatus.current=null;
@@ -98,7 +97,7 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
         <div className="recording-actions">{!active?<button className="capture-button" disabled={busy||selecting||!source||(mode==='region'&&!crop)} onClick={()=>void start()}><span className="record-dot"/>{countdown?`${countdown} 秒后开始…`:busy?'正在准备…':'开始录屏'}</button>:<><button className="recording-secondary" disabled={!['recording','paused'].includes(status!.phase)} onClick={()=>void control(status!.phase==='paused'?'resume':'pause')}>{status!.phase==='paused'?'继续录制':'暂停录制'}</button><button className="recording-stop" disabled={status!.phase==='saving'} onClick={()=>void control('stop')}>{status!.phase==='saving'?'正在保存…':'停止并保存'}</button></>}{status?.phase==='saved'&&status.filePath&&<><button className="recording-secondary" onClick={()=>onEditVideo(status.filePath!)}>添加旁白 / 编辑视频</button><button className="recording-secondary" onClick={()=>{void invoke('reveal_recording');}}>打开所在文件夹</button></>}</div>
         {status&&<div className={`recording-status ${status.phase==='error'?'error':''}`} role="status"><strong>{status.message}</strong>{status.width>0&&<span>{Math.floor(status.elapsedMs/60000).toString().padStart(2,'0')}:{Math.floor(status.elapsedMs/1000%60).toString().padStart(2,'0')} · {status.width} × {status.height} · {(status.bytesWritten/1048576).toFixed(1)} MB</span>}{status.filePath&&<span className="recording-path">{status.filePath}</span>}</div>}
         {error&&<div className="recording-status error" role="alert">{error}</div>}
-        <p className="recording-note">开始后自动收起窗口。用 <kbd>Cmd + Alt + Shift + R</kbd> 或托盘“停止录屏并保存”结束录制。<br/>首次需授予 ScreenShot 屏幕录制权限；麦克风和点击效果需要 macOS 15 或更新版本。</p>
+        <p className="recording-note">自动保存到用户目录下的 screenshot / 日期文件夹，开始后自动收起窗口。用 <kbd>Cmd + Alt + Shift + R</kbd> 或托盘“停止录屏并保存”结束录制。<br/>首次需授予 ScreenShot 屏幕录制权限；麦克风和点击效果需要 macOS 15 或更新版本。</p>
       </>}
     </section>
     {(mode==='tab'||native===false)&&<BrowserRecordingPanel lockedMode={mode} onNotify={onNotify} onEditVideo={onEditVideo} onRecordingStarted={recordingStarted} onRecordingPreparing={()=>{startedSession.current=null;latestStatus.current=null;}}/>}
