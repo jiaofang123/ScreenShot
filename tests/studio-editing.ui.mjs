@@ -31,7 +31,7 @@ const voiceFiles=[];
 for(let i=1;i<=2;i++){
   const path=join(project.rootDir,'voices',`s${i}`);await mkdir(path);
   const audio=join(path,`v${i}.wav`),text=join(path,`v${i}.txt`);
-  run(['-f','lavfi','-i','sine=frequency=440:duration=2','-c:a','pcm_s16le',audio]);await writeFile(text,`文字稿 ${i}`);
+  run(['-f','lavfi','-i',`sine=frequency=440:duration=${i===2?5:2}`,'-c:a','pcm_s16le',audio]);await writeFile(text,`文字稿 ${i}`);
   if(i===1){await writeFile(join(path,'v1.aiff'),'intermediate');await copyFile(audio,join(path,'v1.preview.wav'));}
   voiceFiles.push(audio,text);
   project.assets[0].segments.push({id:`s${i}`,title:`文字稿 ${i}`,text:`旁白 ${i}`,start:i-1,end:i,speed:'normal',activeVoiceId:`v${i}`,voiceVersions:[{id:`v${i}`,path:audio,textPath:text,duration:.8}]});
@@ -40,9 +40,9 @@ project.mergeQueue=project.assets.slice(0,3).map(asset=>({...asset.renderVersion
 await call('project:save',project);
 const browser=await(process.env.TEST_BROWSER==='webkit'?webkit:chromium).launch();
 const page=await browser.newPage({viewport:{width:1440,height:940}});page.setDefaultTimeout(10000);
-const errors=[],calls=[];let slowSave=false,lastMerge=null,dismissNext=false;
+const errors=[],calls=[];let slowSave=false,lastMerge=null;
 page.on('pageerror',error=>errors.push(error.message));
-page.on('dialog',dialog=>{if(dismissNext){dismissNext=false;void dialog.dismiss();}else void dialog.accept();});
+page.on('dialog',dialog=>{throw Error('Editor must use its in-page deletion dialog: '+dialog.message());});
 await page.exposeFunction('mediaCall',async({method,payload})=>{
   calls.push({method,payload});const result=await call(method,payload);
   if(method==='media:mergeVideos')lastMerge=result;
@@ -59,6 +59,8 @@ await page.route('**/__test_media/**',async route=>{
 });
 await page.addInitScript(projectRoot=>{
   window.audioEvents=[];
+  // Reproduce the embedded WKWebView, where native JS confirm is unavailable.
+  window.confirm=()=>false;
   const OriginalAudio=window.Audio;
   window.Audio=function(...args){const audio=new OriginalAudio(...args);for(const name of ['loadstart','loadedmetadata','playing','pause','ended','error','emptied'])audio.addEventListener(name,()=>window.audioEvents.push({name,src:audio.src,time:audio.currentTime,error:audio.error?.code,message:audio.error?.message}));return audio;};
   localStorage.setItem('screenshot-studio-last-project',projectRoot);
@@ -141,6 +143,11 @@ try{
   await editor.locator('#videoPreview').evaluate(video=>{video.currentTime=.5;});await page.waitForTimeout(200);
   assert.equal(await editor.locator('.text-overlay-box').count(),0);assert.equal(await editor.locator('#textTimingPanel').isVisible(),true);
   await editor.locator('[data-text-overlay-list-id]').click();await editor.locator('.text-overlay-box').waitFor();
+  await editor.locator('#textOverlayText').fill('详情修改文字\n第二行');
+  await waitSaved(data=>data.assets.find(asset=>asset.id==='a1').textOverlays?.[0]?.text==='详情修改文字\n第二行');
+  assert.equal(await editor.locator('.text-overlay-content').innerText(),'详情修改文字\n第二行');
+  await editor.locator('.text-overlay-content').fill('画面修改内容');
+  assert.equal(await editor.locator('#textOverlayText').inputValue(),'画面修改内容');
   await page.screenshot({path:join(directory,`editing-${process.env.TEST_BROWSER||'chromium'}.png`)});
   await editor.locator('#synthesizeBtn').click();await editor.locator('#toast').getByText('合成视频已覆盖并加入音视频合并列表').waitFor({timeout:60000});
   const rendered=(await saved()).assets.find(asset=>asset.id==='a1').renderVersions[0];
@@ -149,18 +156,39 @@ try{
   assert.ok(before[0]>220&&after[0]>220&&during[0]<before[0]*.8,JSON.stringify({before,during,after}));
   assert.ok(pixel(rendered.path,1.5,.39,.23)[0]<before[0]*.8);assert.ok(pixel(rendered.path,2.5,.39,.23)[0]>220);
   console.log('PASS: text start/duration edit, invalid range rejected, timing inspector outside visible interval, real export appears only at 1.5–2.5s, regeneration keeps ID/number');
+  await frame.waitForFunction(()=>document.getElementById('videoPreview').readyState>=2&&document.getElementById('videoPreview').duration>=6);
+  await editor.locator('#videoPreview').evaluate(video=>{video.currentTime=4;});await page.waitForTimeout(150);
+  await editor.locator('#insertTextBtn').click();
+  await editor.locator('#textOverlayText').fill('末尾延长画面中的文字');
+  await editor.locator('#textDuration').fill('.8');await editor.locator('#textDuration').press('Tab');
+  await editor.locator('#textStartTime').fill('4.1');await editor.locator('#textStartTime').press('Tab');
+  await frame.evaluate(()=>{for(const [id,value] of [['textBgOpacity','1'],['textBgColor','#000000']]){const input=document.getElementById(id);input.value=value;input.dispatchEvent(new Event('input',{bubbles:true}));}});
+  await editor.locator('[data-merge-render-id="r2"]').uncheck();await editor.locator('[data-merge-render-id="r8"]').uncheck();
+  await editor.locator('#mergePreviewBtn').click();await editor.locator('#toast').getByText('合并预览已生成').waitFor({timeout:60000});
+  const textPreview=lastMerge.path;decode(textPreview);
+  assert.ok(pixel(textPreview,4.5,.39,.23)[0]<100,'Merge preview must include pending text during held last frames');
+  assert.ok(pixel(textPreview,3.5,.39,.23)[0]>220);assert.ok(pixel(textPreview,5.2,.39,.23)[0]>220);
+  assert.ok(pixel(textPreview,2,.39,.23)[0]<200,'Previously burned text must survive merging');
+  await editor.locator('#mergeBtn').click();await editor.locator('#toast').getByText('最终视频已导出').waitFor({timeout:60000});
+  decode(lastMerge.path);assert.ok(pixel(lastMerge.path,4.5,.39,.23)[0]<100);
+  await editor.locator('[data-queue-id="r1"] .item-meta').click();
+  await editor.locator('[data-text-overlay-list-id]').click();
+  assert.equal(await editor.locator('#textOverlayText').inputValue(),'末尾延长画面中的文字');
+  await editor.locator('#synthesizeBtn').click();await editor.locator('#toast').getByText('合成视频已覆盖并加入音视频合并列表').waitFor({timeout:60000});
+  assert.ok(pixel(rendered.path,4.5,.39,.23)[0]<100);
+  console.log('PASS: detail text editing, two-way sync, audio-longer-than-video, pending/burned text retained in merge preview/export and overwrite');
   await editor.locator('[data-asset-id="a1"] .item-meta').click();
-  dismissNext=true;await editor.locator('[data-delete-segment-id="s1"]').click();assert.ok((await stat(voiceFiles[0])).isFile());
+  await editor.locator('[data-delete-segment-id="s1"]').click();await editor.locator('#deleteSegmentDialog button[value="cancel"]').click();assert.ok((await stat(voiceFiles[0])).isFile());
   await editor.locator('[data-segment-title-id="s1"]').fill('删除中的卡片');
   await editor.locator('#previewVoiceBtn').click();
   await editor.getByRole('button',{name:'停止',exact:true}).waitFor({timeout:5000});
   await frame.waitForFunction(()=>window.audioEvents.some(event=>event.name==='playing'));
-  await editor.locator('[data-delete-segment-id="s1"]').click();await editor.locator('[data-segment-id="s1"]').waitFor({state:'detached'});
+  await editor.locator('[data-delete-segment-id="s1"]').click();await editor.locator('#deleteSegmentDialog button[value="delete"]').click();await editor.locator('[data-segment-id="s1"]').waitFor({state:'detached'});
   await editor.locator('#versionCount').getByText('1',{exact:true}).waitFor();
   await frame.waitForFunction(()=>window.audioEvents.some(event=>event.name==='emptied'));
   for(const path of voiceFiles.slice(0,2))assert.equal(await stat(path).then(()=>true,()=>false),false);
   for(const path of voiceFiles.slice(2))assert.equal(await stat(path).then(()=>true,()=>false),true);
-  await editor.locator('[data-delete-segment-id="s2"]').click();await editor.locator('#segmentList .segment-list-item').waitFor({state:'detached'});
+  await editor.locator('[data-delete-segment-id="s2"]').click();await editor.locator('#deleteSegmentDialog button[value="delete"]').click();await editor.locator('#segmentList .segment-list-item').waitFor({state:'detached'});
   assert.equal(await editor.locator('#scriptText').isDisabled(),true);
   await open();await editor.locator('[data-asset-id="a1"] .item-meta').click();assert.equal(await editor.locator('#segmentList .segment-list-item').count(),0);
   await editor.locator('#addSegmentBtn').click();await editor.locator('#segmentList .segment-list-item').waitFor();assert.equal(await editor.locator('#scriptText').isEnabled(),true);

@@ -42,6 +42,7 @@
             </div>
             <div class="inserted-text-list" id="insertedTextList"></div>
             <div id="textTimingPanel" class="text-timing-panel" hidden>
+              <label class="text-content-field">文字内容<textarea id="textOverlayText" rows="3" aria-label="插入文字内容" placeholder="输入文字"></textarea></label>
               <label>插入时间（秒）<input id="textStartTime" type="number" min="0" step="0.001" aria-label="文字插入时间（秒）"></label>
               <label>显示时长（秒）<input id="textDuration" type="number" min="0.1" step="0.001" aria-label="文字显示时长（秒）"></label>
               <span id="textEndTime" class="item-meta"></span>
@@ -212,6 +213,13 @@
       </form>
     </dialog>
 
+    <dialog id="deleteSegmentDialog" class="delete-confirm-dialog" aria-labelledby="deleteSegmentHeading">
+      <form method="dialog">
+        <h2 id="deleteSegmentHeading">删除文字稿</h2>
+        <p id="deleteSegmentMessage"></p>
+        <div class="button-row"><button class="secondary" value="cancel" autofocus>取消</button><button class="danger" value="delete">确认删除</button></div>
+      </form>
+    </dialog>
     <div class="toast" id="toast"></div>
     <script src="./bridge.js"></script>
     <script src="./app.js" type="module"></script>

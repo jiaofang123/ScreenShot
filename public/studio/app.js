@@ -11,6 +11,8 @@ const els = {
   insertedTextCount: $("insertedTextCount"),
   insertedTextList: $("insertedTextList"),
   textTimingPanel: $("textTimingPanel"), textStartTime: $("textStartTime"), textDuration: $("textDuration"), textEndTime: $("textEndTime"),
+  textOverlayText: $("textOverlayText"),
+  deleteSegmentDialog: $("deleteSegmentDialog"), deleteSegmentMessage: $("deleteSegmentMessage"),
   queueCount: $("queueCount"),
   mergeQueue: $("mergeQueue"),
   previewTitle: $("previewTitle"),
@@ -1108,8 +1110,13 @@ function deleteVoice(voiceId, segmentId = state.selectedSegmentId) {
 async function deleteSegment(segmentId) {
   const project = state.project, asset = selectedAsset();
   const segment = asset?.segments?.find(item => item.id === segmentId);
-  if (!project || !segment || state.deletingSegmentId || state.voiceJobs.has(segmentId)) return;
-  if (!confirm(`删除文字稿“${segmentTitle(segment, segmentIndex(asset, segmentId))}”及其对应的语音文件？`)) return;
+  if (!project || !segment || state.deletingSegmentId || els.deleteSegmentDialog.open || state.voiceJobs.has(segmentId)) return;
+  // WKWebView does not present window.confirm in the embedded editor.
+  els.deleteSegmentMessage.textContent = `删除文字稿“${segmentTitle(segment, segmentIndex(asset, segmentId))}”及其对应的语音文件？`;
+  els.deleteSegmentDialog.returnValue = 'cancel';
+  const confirmed = new Promise(resolve => els.deleteSegmentDialog.addEventListener('close', () => resolve(els.deleteSegmentDialog.returnValue === 'delete'), { once: true }));
+  els.deleteSegmentDialog.showModal();
+  if (!await confirmed || state.project !== project || !asset.segments.includes(segment)) return;
   updateSegmentFromForm();
   if ((segment.voiceVersions || []).some(voice => voice.id === state.previewAudioVoiceId)) stopVoicePreview();
   state.deletingSegmentId = segmentId; renderSegmentList();
@@ -1527,6 +1534,7 @@ function syncTextTimingPanel() {
   els.textTimingPanel.hidden = !overlay;
   if (!overlay) return;
   normalizeTextOverlay(overlay);
+  if (document.activeElement !== els.textOverlayText) els.textOverlayText.value = overlay.text || '';
   const duration = Number(els.videoPreview.duration);
   for (const [input, value] of [[els.textStartTime, overlay.start], [els.textDuration, overlay.end - overlay.start]]) {
     if (document.activeElement !== input) { input.value = Number(value.toFixed(3)); input.setCustomValidity(''); }
@@ -2655,6 +2663,13 @@ function attachEvents() {
     saveProjectSoon(); renderAssets();
   }});
   attachSortable(els.mergeQueue, { selector: '[data-queue-id]', id: card => card.dataset.queueId, commit: reorderQueue });
+  els.textOverlayText.addEventListener('input', () => {
+    const overlay = selectedTextOverlay();
+    if (!overlay) return;
+    updateTextOverlay(overlay, { text: els.textOverlayText.value });
+    renderTextOverlays();
+    renderInspector(false);
+  });
   for (const input of [els.textStartTime, els.textDuration]) {
     input.addEventListener('change', updateTextTiming);
     input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } });

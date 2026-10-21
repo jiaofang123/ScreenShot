@@ -276,12 +276,17 @@ function wrapTextForDrawtext(text, overlay) {
   return lines.slice(0, maxLines);
 }
 
-async function buildTextOverlayFilters({ projectRoot, outputId, textOverlays = [] }) {
+async function buildTextOverlayFilters({ projectRoot, outputId, textOverlays = [], videoDuration }) {
   const tmpDir = await ensureDir(assetSubdir(projectRoot, "tmp"));
   const fontFile = defaultDrawtextFontFile();
   const filters = [];
   let current = "vbase";
-  filters.push(`[0:v]scale=${OUTPUT_VIDEO_WIDTH}:-2,fps=30[${current}]`);
+  // A narration/audio track can outlast the source video. The player holds the
+  // last image, so create those frames before applying time-based text too.
+  const duration = Number(videoDuration);
+  const hold = Number.isFinite(duration) && duration > 0
+    ? `,tpad=stop_mode=clone:stop_duration=${duration.toFixed(3)},trim=duration=${duration.toFixed(3)}` : '';
+  filters.push(`[0:v]setpts=PTS-STARTPTS,scale=${OUTPUT_VIDEO_WIDTH}:'trunc(${OUTPUT_VIDEO_WIDTH}/dar/2)*2',setsar=1,fps=30${hold}[${current}]`);
   const normalized = textOverlays.map(normalizeTextOverlayForRender).filter((item) => item.text);
 
   for (const [overlayIndex, overlay] of normalized.entries()) {
@@ -329,19 +334,24 @@ async function buildTextOverlayFilters({ projectRoot, outputId, textOverlays = [
 
 async function materializeMergeItemForConcat(ffmpeg, { projectRoot, outputId, item, index }) {
   const textOverlays = Array.isArray(item.textOverlays) ? item.textOverlays : [];
+  const videoDuration = Math.max(0.1, Number(await probeMediaDuration(ffmpeg, item.path)) || 0,
+    ...textOverlays.map(overlay => normalizeTextOverlayForRender(overlay).end));
   const { filters, normalized } = await buildTextOverlayFilters({
     projectRoot,
     outputId: `${outputId}-merge-${index}`,
-    textOverlays
+    textOverlays, videoDuration
   });
 
   const tmpDir = await ensureDir(assetSubdir(projectRoot, "tmp"));
   const output = join(tmpDir, `${outputId}-merge-${index}.mp4`);
+  // Concat requires one geometry for every clip. Fit the entire composed frame
+  // (including text) inside 1080p, then letterbox instead of stretching it.
+  filters.push('[vout]scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1[vconcat]');
   await runCommand(ffmpeg, [
     "-y",
     "-i", item.path,
     "-filter_complex", filters.join(";"),
-    "-map", "[vout]",
+    "-map", "[vconcat]",
     "-map", "0:a?",
     "-c:v", "libx264",
     "-preset", "veryfast",
@@ -349,7 +359,8 @@ async function materializeMergeItemForConcat(ffmpeg, { projectRoot, outputId, it
     "-c:a", "aac",
     "-b:a", "192k",
     "-ar", "48000",
-    "-af", "asetpts=PTS-STARTPTS",
+    "-af", `asetpts=PTS-STARTPTS,apad=whole_dur=${videoDuration.toFixed(3)}`,
+    "-t", videoDuration.toFixed(3),
     output
   ]);
 
@@ -939,7 +950,7 @@ async function generateVoiceWithWindowsSapi(values) {
       "-filter_complex", filter,
       "-map", "0:v:0",
       "-map", "[voice]",
-      "-vf", "scale=1920:-2,fps=30",
+      "-vf", "setsar=1,fps=30",
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-crf", "20",
@@ -992,16 +1003,6 @@ async function generateVoiceWithWindowsSapi(values) {
         };
       }));
 
-    const { filters: videoFilters, normalized: normalizedTextOverlays } = await buildTextOverlayFilters({
-      projectRoot: payload.projectRoot,
-      outputId,
-      textOverlays
-    });
-
-    if (!overlays.length && !normalizedTextOverlays.length) {
-      throw new Error("没有可合成的有效旁白语音或文字。");
-    }
-
     const sourceDuration = await probeMediaDuration(ffmpeg, payload.videoPath);
     const videoDuration = Math.max(
       0.1,
@@ -1009,8 +1010,14 @@ async function generateVoiceWithWindowsSapi(values) {
       Number(sourceDuration || 0),
       ...overlays.map((overlay) => overlay.end),
       ...overlays.map((overlay) => overlay.start + Number(overlay.voiceDuration || 0)),
-      ...normalizedTextOverlays.map((overlay) => overlay.end)
+      ...textOverlays.map((overlay) => normalizeTextOverlayForRender(overlay).end)
     );
+    const { filters: videoFilters, normalized: normalizedTextOverlays } = await buildTextOverlayFilters({
+      projectRoot: payload.projectRoot, outputId, textOverlays, videoDuration
+    });
+    if (!overlays.length && !normalizedTextOverlays.length) {
+      throw new Error("没有可合成的有效旁白语音或文字。");
+    }
 
     for (const overlay of overlays) args.push("-i", overlay.voicePath);
 

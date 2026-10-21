@@ -961,6 +961,12 @@ textarea:focus {
 .text-timing-panel label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .text-timing-panel .item-meta { grid-column: 1 / -1; }
 .text-timing-panel input { min-width: 0; }
+.text-timing-panel .text-content-field { grid-column: 1 / -1; }
+.text-timing-panel textarea { min-width: 0; resize: vertical; }
+.delete-confirm-dialog { max-width: min(440px, calc(100vw - 40px)); border: 1px solid var(--line); border-radius: 12px; padding: 22px; background: var(--surface); color: var(--text); }
+.delete-confirm-dialog::backdrop { background: #0009; }
+.delete-confirm-dialog h2 { margin: 0 0 12px; font-size: 18px; }
+.delete-confirm-dialog p { line-height: 1.6; overflow-wrap: anywhere; }
 
 .merge-check {
   display: inline-flex;
