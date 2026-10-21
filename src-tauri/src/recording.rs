@@ -52,6 +52,8 @@ pub struct RecordingOptions {
 #[serde(rename_all = "camelCase")]
 pub struct RecordingStatus {
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub controller_id: Option<String>,
     pub mode: RecordingMode,
     pub phase: String,
     pub message: String,
@@ -77,7 +79,7 @@ type EventSink = Arc<dyn Fn(RecordingStatus) + Send + Sync>;
 
 struct Session {
     status: Mutex<RecordingStatus>,
-    options: RecordingOptions,
+    native_running: AtomicBool,
     desired: AtomicU8,
     disconnected: AtomicBool,
     connected: AtomicBool,
@@ -142,7 +144,8 @@ impl Session {
             CANCEL => "cancel",
             _ => "resume",
         };
-        serde_json::json!({"command":command, "phase":self.status.lock().phase})
+        let status = self.status.lock().clone();
+        serde_json::json!({"command":command, "phase":status.phase,"status":status})
     }
 }
 
@@ -186,36 +189,9 @@ impl RecordingManager {
         {
             return Err("已有录屏任务，请先停止".into());
         }
-        let helper = crate::studio::resource(&app, "runtime/screenshot-recorder");
-        if !helper.is_file() {
-            return Err("未找到原生录屏组件，请重新打包安装".into());
-        }
-        let destination = path.with_extension("mp4");
-        if destination != path && destination.exists() {
-            return Err("同名 MP4 已存在，请更换文件名".into());
-        }
-        let temporary =
-            destination.with_file_name(format!(".ScreenShot-{}.partial.mp4", Uuid::new_v4()));
-        let mix_audio = options.audio && source["microphone"] == true;
-        let mut config = serde_json::to_value(&options).map_err(|e| e.to_string())?;
-        for key in ["sourceId", "crop", "microphone", "cursor", "clicks"] {
-            if let Some(value) = source.get(key) {
-                config[key] = value.clone();
-            }
-        }
-        let mut child = Command::new(helper)
-            .arg(config.to_string())
-            .arg(&temporary)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            .spawn()
-            .map_err(|e| format!("无法启动原生录屏：{e}"))?;
-        let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
-        let output = child.stdout.take().unwrap();
-        let child = Arc::new(Mutex::new(child));
         let status = RecordingStatus {
             id: Uuid::new_v4().to_string(),
+            controller_id: None,
             mode: options.mode,
             phase: "waiting".into(),
             message: "正在启动本机录屏…".into(),
@@ -249,7 +225,7 @@ impl RecordingManager {
         });
         let session = Arc::new(Session {
             status: Mutex::new(status.clone()),
-            options,
+            native_running: AtomicBool::new(false),
             desired: AtomicU8::new(CONTINUE),
             disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(true),
@@ -263,144 +239,14 @@ impl RecordingManager {
         }
         drop(current);
         (session.sink)(status.clone());
-        let controller = session.clone();
-        let process = child.clone();
-        let temporary_metrics = temporary.clone();
-        thread::spawn(move || {
-            let mut previous = CONTINUE;
-            let mut elapsed = 0;
-            let mut last = Instant::now();
-            let mut tick = Instant::now();
-            while controller.status.lock().active() {
-                let command = controller.desired.load(Ordering::Acquire);
-                if command != previous {
-                    let name = match command {
-                        PAUSE => "pause",
-                        STOP | CANCEL => "stop",
-                        _ => "resume",
-                    };
-                    let _ = writeln!(input.lock(), "{name}");
-                    previous = command;
-                }
-                let phase = controller.status.lock().phase.clone();
-                if phase == "recording" {
-                    elapsed += last.elapsed().as_millis() as u64;
-                }
-                last = Instant::now();
-                if tick.elapsed() >= Duration::from_secs(1) {
-                    let bytes = std::fs::metadata(&temporary_metrics)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
-                    controller.update(|status| {
-                        status.elapsed_ms = elapsed;
-                        status.bytes_written = bytes;
-                    });
-                    tick = Instant::now();
-                }
-                if controller
-                    .stop_requested_at
-                    .lock()
-                    .is_some_and(|since| since.elapsed() > Duration::from_secs(30))
-                {
-                    let _ = process.lock().kill();
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
-        });
-        thread::spawn(move || {
-            use std::io::{BufRead, BufReader};
-            let mut saved = false;
-            let mut message = "原生录屏进程已结束".to_string();
-            for line in BufReader::new(output).lines().map_while(Result::ok) {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                match value["event"].as_str().unwrap_or("") {
-                    "started" => {
-                        session.update(|status| {
-                            status.phase = "recording".into();
-                            status.message = "原生录屏进行中".into();
-                            status.width = value["width"].as_u64().unwrap_or(0) as u32;
-                            status.height = value["height"].as_u64().unwrap_or(0) as u32;
-                            status.has_audio = value["hasAudio"] == true;
-                        });
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.hide();
-                        }
-                    }
-                    "paused" => session.update(|s| {
-                        s.phase = "paused".into();
-                        s.message = "录屏已暂停".into();
-                    }),
-                    "resumed" => session.update(|s| {
-                        s.phase = "recording".into();
-                        s.message = "原生录屏进行中".into();
-                    }),
-                    "saved" => {
-                        saved = true;
-                    }
-                    "error" => {
-                        message = value["message"].as_str().unwrap_or("原生录屏失败").into();
-                    }
-                    _ => {}
-                }
-            }
-            let _ = child.lock().wait();
-            if saved && mix_audio {
-                session.update(|status| {
-                    status.phase = "saving".into();
-                    status.message = "正在合并系统声音和麦克风…".into();
-                });
-                if let Err(error) = crate::studio::mix_recording_audio(&app, &temporary) {
-                    saved = false;
-                    message = error;
-                }
-            }
-            let bytes = std::fs::metadata(&temporary).map(|m| m.len()).unwrap_or(0);
-            if saved && bytes > 0 {
-                let commit = if destination == path {
-                    std::fs::rename(&temporary, &destination)
-                } else {
-                    std::fs::hard_link(&temporary, &destination)
-                        .and_then(|_| std::fs::remove_file(&temporary))
-                };
-                if let Err(error) = commit {
-                    saved = false;
-                    message = format!("视频提交失败：{error}");
-                }
-            } else {
-                saved = false;
-            }
-            let final_path = if saved {
-                Some(destination)
-            } else if bytes > 0 {
-                let recovery = path.with_file_name(format!(
-                    "{}-未完成-{}.mp4",
-                    path.file_stem().unwrap_or_default().to_string_lossy(),
-                    &Uuid::new_v4().simple().to_string()[..8]
-                ));
-                if std::fs::rename(&temporary, &recovery).is_ok() {
-                    Some(recovery)
-                } else {
-                    Some(temporary.clone())
-                }
-            } else {
-                let _ = std::fs::remove_file(&temporary);
-                None
-            };
+        if let Err(error) = launch_native(app.clone(), session.clone(), source, path) {
             session.update(|status| {
-                status.phase = if saved { "saved" } else { "error" }.into();
-                status.message = if saved {
-                    "录屏已保存".into()
-                } else {
-                    message
-                };
-                status.bytes_written = bytes;
-                status.file_path = final_path.map(|p| p.to_string_lossy().into_owned());
+                status.phase = "error".into();
+                status.message = error.clone();
             });
-            session.shutdown.store(true, Ordering::Release);
-        });
+            crate::capture::show_main_window(&app);
+            return Err(error);
+        }
         Ok(status)
     }
 
@@ -423,12 +269,24 @@ impl RecordingManager {
         Ok(())
     }
 
+    #[allow(dead_code)] // Also used by the standalone synthetic-media harness.
     pub fn prepare(
         &self,
         options: RecordingOptions,
         path: PathBuf,
         browser: String,
         sink: EventSink,
+    ) -> Result<PreparedRecording, String> {
+        self.prepare_with_app(options, path, browser, sink, None)
+    }
+
+    fn prepare_with_app(
+        &self,
+        options: RecordingOptions,
+        path: PathBuf,
+        browser: String,
+        sink: EventSink,
+        app: Option<AppHandle>,
     ) -> Result<PreparedRecording, String> {
         if !matches!(options.fps, 15 | 30 | 60) {
             return Err("录屏帧率仅支持 15、30 或 60 fps".into());
@@ -469,8 +327,10 @@ impl RecordingManager {
         let token = Uuid::new_v4().simple().to_string();
         let origin = format!("http://127.0.0.1:{port}");
         let prefix = format!("/{token}/");
+        let id = Uuid::new_v4().to_string();
         let status = RecordingStatus {
-            id: Uuid::new_v4().to_string(),
+            id: id.clone(),
+            controller_id: Some(id),
             mode: options.mode,
             phase: "waiting".into(),
             message: format!("已打开{browser}，请在录屏页面选择要共享的内容"),
@@ -487,7 +347,7 @@ impl RecordingManager {
         };
         let session = Arc::new(Session {
             status: Mutex::new(status.clone()),
-            options,
+            native_running: AtomicBool::new(false),
             desired: AtomicU8::new(CONTINUE),
             disconnected: AtomicBool::new(false),
             connected: AtomicBool::new(false),
@@ -514,6 +374,7 @@ impl RecordingManager {
                 ws_port,
                 path,
                 temporary,
+                app,
             )
         });
         (session.sink)(status.clone());
@@ -534,6 +395,7 @@ pub async fn native_capture_sources(app: AppHandle) -> Result<serde_json::Value,
     tauri::async_runtime::spawn_blocking(move || {
         let output = Command::new(crate::studio::resource(&app, "runtime/screenshot-recorder"))
             .arg("list")
+            .arg(std::process::id().to_string())
             .output()
             .map_err(|e| e.to_string())?;
         let data: serde_json::Value = serde_json::from_slice(&output.stdout)
@@ -596,77 +458,78 @@ impl Drop for RecordingManager {
 }
 
 fn websocket_worker(listener: TcpListener, session: Arc<Session>, origin: String, prefix: String) {
-    let deadline = Instant::now() + Duration::from_secs(600);
-    let mut connection = None;
-    while !session.shutdown.load(Ordering::Acquire) && Instant::now() < deadline {
-        if !session.status.lock().active() {
-            break;
+    loop {
+        let mut connection = None;
+        while !session.shutdown.load(Ordering::Acquire) {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
+                    let result = tungstenite::accept_hdr(
+                        stream,
+                        |request: &WsRequest, response: WsResponse| {
+                            if request.uri().path() != prefix
+                                || request
+                                    .headers()
+                                    .get("Origin")
+                                    .and_then(|value| value.to_str().ok())
+                                    != Some(origin.as_str())
+                            {
+                                let mut denied = ErrorResponse::new(Some("禁止访问".into()));
+                                *denied.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
+                                return Err(denied);
+                            }
+                            Ok(response)
+                        },
+                    );
+                    if let Ok(socket) = result {
+                        connection = Some(socket);
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(50))
+                }
+                Err(_) => break,
+            }
         }
-        match listener.accept() {
-            Ok((stream, _)) => {
-                let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
-                let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-                let result =
-                    tungstenite::accept_hdr(stream, |request: &WsRequest, response: WsResponse| {
-                        if request.uri().path() != prefix
-                            || request
-                                .headers()
-                                .get("Origin")
-                                .and_then(|value| value.to_str().ok())
-                                != Some(origin.as_str())
-                        {
-                            let mut denied = ErrorResponse::new(Some("禁止访问".into()));
-                            *denied.status_mut() = tungstenite::http::StatusCode::FORBIDDEN;
-                            return Err(denied);
-                        }
-                        Ok(response)
-                    });
-                if let Ok(socket) = result {
-                    connection = Some(socket);
+        let Some(mut socket) = connection else {
+            return;
+        };
+        session.disconnected.store(false, Ordering::Release);
+        session.connected.store(true, Ordering::Release);
+        let _ = socket
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_millis(100)));
+        let mut last_message = Instant::now() - Duration::from_secs(2);
+        let mut last_control = u8::MAX;
+        while !session.shutdown.load(Ordering::Acquire) {
+            let desired = session.desired.load(Ordering::Acquire);
+            if desired != last_control || last_message.elapsed() >= Duration::from_secs(1) {
+                if socket
+                    .send(Message::Text(session.control_json().to_string().into()))
+                    .is_err()
+                {
                     break;
                 }
+                last_control = desired;
+                last_message = Instant::now();
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(50))
+            match socket.read() {
+                Ok(Message::Close(_)) => break,
+                Ok(_) => {}
+                Err(tungstenite::Error::Io(error))
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(_) => break,
             }
-            Err(_) => break,
         }
+        let _ = socket.close(None);
+        session.disconnected.store(true, Ordering::Release);
+        session.connected.store(false, Ordering::Release);
     }
-    let Some(mut socket) = connection else {
-        return;
-    };
-    session.connected.store(true, Ordering::Release);
-    let _ = socket
-        .get_mut()
-        .set_read_timeout(Some(Duration::from_millis(100)));
-    let mut last_message = Instant::now() - Duration::from_secs(2);
-    let mut last_control = u8::MAX;
-    while !session.shutdown.load(Ordering::Acquire) {
-        let desired = session.desired.load(Ordering::Acquire);
-        if desired != last_control || last_message.elapsed() >= Duration::from_secs(1) {
-            if socket
-                .send(Message::Text(session.control_json().to_string().into()))
-                .is_err()
-            {
-                break;
-            }
-            last_control = desired;
-            last_message = Instant::now();
-        }
-        match socket.read() {
-            Ok(Message::Close(_)) => break,
-            Ok(_) => {}
-            Err(tungstenite::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            Err(_) => break,
-        }
-    }
-    let _ = socket.close(None);
-    session.disconnected.store(true, Ordering::Release);
-    session.connected.store(false, Ordering::Release);
 }
 
 #[derive(Deserialize)]
@@ -798,7 +661,9 @@ fn recording_server(
     ws_port: u16,
     path: PathBuf,
     temporary: NamedTempFile,
+    app: Option<AppHandle>,
 ) {
+    let base_path = path.clone();
     let mut output = Output {
         file: Some(temporary),
         destination: path.clone(),
@@ -814,17 +679,26 @@ fn recording_server(
             break;
         }
         if session.disconnected.load(Ordering::Acquire) && session.status.lock().active() {
-            fail_session(&session, &mut output, "录屏页面已关闭或连接中断");
+            if session.native_running.load(Ordering::Acquire) {
+                let _ = session.control("stop");
+            } else {
+                fail_session(&session, &mut output, "录屏页面已关闭或连接中断");
+            }
         }
         let stop_timed_out = session
             .stop_requested_at
             .lock()
             .is_some_and(|since| since.elapsed() > Duration::from_secs(20));
-        if stop_timed_out && session.status.lock().active() {
+        if stop_timed_out
+            && session.status.lock().active()
+            && !session.native_running.load(Ordering::Acquire)
+        {
             fail_session(&session, &mut output, "录屏页面未能及时停止");
         }
         if session.status.lock().phase == "waiting"
-            && (created.elapsed() > Duration::from_secs(600)
+            && !session.native_running.load(Ordering::Acquire)
+            && ((created.elapsed() > Duration::from_secs(600)
+                && !session.connected.load(Ordering::Acquire))
                 || session.desired.load(Ordering::Acquire) >= STOP)
         {
             output.file.take();
@@ -835,16 +709,29 @@ fn recording_server(
         }
         if !session.status.lock().active() {
             let since = terminal_at.get_or_insert_with(Instant::now);
-            if since.elapsed() > Duration::from_secs(30) {
+            if since.elapsed() > Duration::from_secs(30)
+                && !session.connected.load(Ordering::Acquire)
+            {
                 break;
             }
+        } else {
+            terminal_at = None;
         }
         let request = match server.recv_timeout(Duration::from_millis(200)) {
             Ok(Some(request)) => request,
             Ok(None) => continue,
             Err(_) => break,
         };
-        handle_request(request, &session, &origin, &prefix, ws_port, &mut output);
+        handle_request(
+            request,
+            &session,
+            &origin,
+            &prefix,
+            ws_port,
+            &mut output,
+            &base_path,
+            app.as_ref(),
+        );
     }
     if session.status.lock().active() {
         fail_session(&session, &mut output, "录屏连接已停止");
@@ -904,11 +791,13 @@ fn body(request: &mut Request, maximum: u64) -> Result<Vec<u8>, String> {
 
 fn handle_request(
     mut request: Request,
-    session: &Session,
+    session: &Arc<Session>,
     origin: &str,
     prefix: &str,
     ws_port: u16,
     output: &mut Output,
+    base_path: &Path,
+    app: Option<&AppHandle>,
 ) {
     if header(&request, "Host").as_deref() != Some(origin.trim_start_matches("http://"))
         || header(&request, "Origin").is_some_and(|value| value != origin)
@@ -947,11 +836,14 @@ fn handle_request(
                 "text/javascript; charset=utf-8",
                 include_str!("../recorder/crop-worker.js"),
             ),
-            "config" => json(
-                request,
-                200,
-                serde_json::json!({"options":session.options,"status":session.status.lock().clone(),"preferredFormat":output.requested.extension().and_then(|extension| extension.to_str()).unwrap_or("mp4"),"webSocketUrl":format!("ws://127.0.0.1:{ws_port}{prefix}")}),
-            ),
+            "config" => {
+                let status = session.status.lock().clone();
+                json(
+                    request,
+                    200,
+                    serde_json::json!({"options":status.options,"status":status,"nativeCapture":app.is_some() && cfg!(target_os="macos"),"preferredFormat":output.requested.extension().and_then(|extension| extension.to_str()).unwrap_or("mp4"),"webSocketUrl":format!("ws://127.0.0.1:{ws_port}{prefix}")}),
+                );
+            }
             _ => respond(request, 404, "text/plain", "未找到录屏资源"),
         }
         return;
@@ -960,18 +852,128 @@ fn handle_request(
         respond(request, 405, "text/plain", "不支持的请求方法");
         return;
     }
-    if !session.status.lock().active() {
+    // Requests from an earlier round must never append to or stop a new recording.
+    if header(&request, "X-Recording-Id").as_deref() != Some(session.status.lock().id.as_str()) {
+        json(
+            request,
+            409,
+            serde_json::json!({"error":"录屏任务已更新，请使用当前设置页"}),
+        );
+        return;
+    }
+    if route == "restart" {
+        let result = (|| -> Result<serde_json::Value, String> {
+            let current = session.status.lock().clone();
+            if session.native_running.load(Ordering::Acquire)
+                || (current.active()
+                    && (output.mime.is_some()
+                        || !matches!(current.phase.as_str(), "waiting" | "selecting")))
+            {
+                return Err("请先停止并等待当前录制保存完成".into());
+            }
+            let options: RecordingOptions = serde_json::from_slice(&body(&mut request, 4096)?)
+                .map_err(|error| error.to_string())?;
+            if !matches!(options.fps, 15 | 30 | 60) {
+                return Err("帧率无效".into());
+            }
+            let path = if current.phase == "waiting" && output.mime.is_none() {
+                output.requested.clone()
+            } else {
+                next_recording_path(base_path)
+            };
+            let temporary =
+                NamedTempFile::new_in(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            *output = Output {
+                file: Some(temporary),
+                destination: path.clone(),
+                requested: path,
+                next_sequence: 0,
+                bytes: 0,
+                mime: None,
+            };
+            session.desired.store(CONTINUE, Ordering::Release);
+            session.stop_requested_at.lock().take();
+            session.update(|status| {
+                status.id = Uuid::new_v4().to_string();
+                status.mode = options.mode;
+                status.options = options;
+                status.phase = "waiting".into();
+                status.message = "请选择下一次录制的内容".into();
+                status.elapsed_ms = 0;
+                status.bytes_written = 0;
+                status.file_path = None;
+                status.width = 0;
+                status.height = 0;
+                status.has_audio = false;
+                status.source_name.clear();
+            });
+            Ok(serde_json::json!({"status":session.status.lock().clone()}))
+        })();
+        match result {
+            Ok(value) => json(request, 200, value),
+            Err(error) => json(request, 400, serde_json::json!({"error":error})),
+        }
+        return;
+    }
+    if !session.status.lock().active() && !matches!(route, "reveal" | "native-sources") {
         json(request, 409, serde_json::json!({"error":"录屏会话已结束"}));
         return;
     }
     let result: Result<serde_json::Value, String> = (|| match route {
+        "reveal" => {
+            let app = app.ok_or("请在 ScreenShot 中打开保存目录")?;
+            reveal_recording(app.state::<RecordingManager>())?;
+            Ok(serde_json::json!({"ok":true}))
+        }
+        "native-sources" => {
+            let app = app.ok_or("当前系统不支持本机来源选择")?;
+            tauri::async_runtime::block_on(native_capture_sources(app.clone()))
+        }
+        "native-region" => {
+            let app = app.ok_or("当前系统不支持本机区域框选")?;
+            let value: serde_json::Value =
+                serde_json::from_slice(&body(&mut request, 4096)?).map_err(|e| e.to_string())?;
+            let monitor = value["monitorId"]
+                .as_u64()
+                .and_then(|id| u32::try_from(id).ok())
+                .ok_or("请选择显示器")?;
+            let selected = tauri::async_runtime::block_on(
+                crate::capture::select_recording_region(app.clone(), monitor, Some(false)),
+            )?;
+            serde_json::to_value(selected).map_err(|e| e.to_string())
+        }
+        "native-begin" => {
+            let app = app.ok_or("当前系统不支持原生录制")?;
+            if !cfg!(target_os = "macos")
+                || session.status.lock().mode == RecordingMode::Tab
+                || output.mime.is_some()
+                || session.native_running.load(Ordering::Acquire)
+            {
+                return Err("当前录制来源不可用".into());
+            }
+            let source: serde_json::Value =
+                serde_json::from_slice(&body(&mut request, 4096)?).map_err(|e| e.to_string())?;
+            launch_native(
+                app.clone(),
+                session.clone(),
+                source,
+                output.requested.clone(),
+            )?;
+            Ok(session.control_json())
+        }
         "begin" => {
             let data: BeginRequest = serde_json::from_slice(&body(&mut request, 64 * 1024)?)
                 .map_err(|error| error.to_string())?;
             if session.desired.load(Ordering::Acquire) >= STOP {
                 return Err("录屏已取消".into());
             }
-            output.begin(&data, session.options.mode)?;
+            if app.is_some()
+                && cfg!(target_os = "macos")
+                && session.status.lock().mode != RecordingMode::Tab
+            {
+                return Err("窗口和屏幕请使用排除工具界面的原生录制".into());
+            }
+            output.begin(&data, session.status.lock().mode)?;
             session.update(|status| {
                 status.phase = "recording".into();
                 status.message = "录屏进行中，可切换回目标应用".into();
@@ -1044,6 +1046,10 @@ fn handle_request(
         "error" => {
             let value: serde_json::Value = serde_json::from_slice(&body(&mut request, 4096)?)
                 .map_err(|error| error.to_string())?;
+            if session.native_running.load(Ordering::Acquire) {
+                session.control("stop")?;
+                return Ok(session.control_json());
+            }
             fail_session(
                 session,
                 output,
@@ -1072,6 +1078,203 @@ fn handle_request(
         Ok(value) => json(request, 200, value),
         Err(error) => json(request, 400, serde_json::json!({"error":error})),
     }
+}
+
+fn next_recording_path(base: &Path) -> PathBuf {
+    base.with_file_name(format!(
+        "{}-{}.{}",
+        base.file_stem().unwrap_or_default().to_string_lossy(),
+        &Uuid::new_v4().simple().to_string()[..8],
+        base.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("mp4")
+    ))
+}
+
+fn launch_native(
+    app: AppHandle,
+    session: Arc<Session>,
+    source: serde_json::Value,
+    path: PathBuf,
+) -> Result<(), String> {
+    let options = session.status.lock().options.clone();
+    let helper = crate::studio::resource(&app, "runtime/screenshot-recorder");
+    if !helper.is_file() {
+        return Err("未找到原生录屏组件，请重新打包安装".into());
+    }
+    let destination = path.with_extension("mp4");
+    if destination != path && destination.exists() {
+        return Err("同名 MP4 已存在，请更换文件名".into());
+    }
+    let temporary =
+        destination.with_file_name(format!(".ScreenShot-{}.partial.mp4", Uuid::new_v4()));
+    let mix_audio = options.audio && source["microphone"] == true;
+    let mut config = serde_json::to_value(&options).map_err(|e| e.to_string())?;
+    config["excludedProcessIDs"] = serde_json::json!([std::process::id()]);
+    for key in ["sourceId", "crop", "microphone", "cursor", "clicks"] {
+        if let Some(value) = source.get(key) {
+            config[key] = value.clone();
+        }
+    }
+    let mut child = Command::new(helper)
+        .arg(config.to_string())
+        .arg(&temporary)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("无法启动原生录屏：{e}"))?;
+    let input = Arc::new(Mutex::new(child.stdin.take().unwrap()));
+    let output = child.stdout.take().unwrap();
+    let child = Arc::new(Mutex::new(child));
+    session.native_running.store(true, Ordering::Release);
+    let recording_id = session.status.lock().id.clone();
+    let controller = session.clone();
+    let process = child.clone();
+    let temporary_metrics = temporary.clone();
+    thread::spawn(move || {
+        let mut previous = CONTINUE;
+        let mut elapsed = 0;
+        let mut last = Instant::now();
+        let mut tick = Instant::now();
+        while controller.native_running.load(Ordering::Acquire)
+            && controller.status.lock().id == recording_id
+        {
+            let command = controller.desired.load(Ordering::Acquire);
+            if command != previous {
+                let name = match command {
+                    PAUSE => "pause",
+                    STOP | CANCEL => "stop",
+                    _ => "resume",
+                };
+                let _ = writeln!(input.lock(), "{name}");
+                previous = command;
+            }
+            let phase = controller.status.lock().phase.clone();
+            if phase == "recording" {
+                elapsed += last.elapsed().as_millis() as u64;
+            }
+            last = Instant::now();
+            if tick.elapsed() >= Duration::from_secs(1) {
+                let bytes = std::fs::metadata(&temporary_metrics)
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                controller.update(|status| {
+                    if status.id == recording_id {
+                        status.elapsed_ms = elapsed;
+                        status.bytes_written = bytes;
+                    }
+                });
+                tick = Instant::now();
+            }
+            if controller
+                .stop_requested_at
+                .lock()
+                .is_some_and(|since| since.elapsed() > Duration::from_secs(30))
+            {
+                let _ = process.lock().kill();
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    });
+    thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let mut saved = false;
+        let mut message = "原生录屏进程已结束".to_string();
+        for line in BufReader::new(output).lines().map_while(Result::ok) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            match value["event"].as_str().unwrap_or("") {
+                "started" => {
+                    session.update(|status| {
+                        status.phase = "recording".into();
+                        status.message = "原生录屏进行中".into();
+                        status.width = value["width"].as_u64().unwrap_or(0) as u32;
+                        status.height = value["height"].as_u64().unwrap_or(0) as u32;
+                        status.has_audio = value["hasAudio"] == true;
+                    });
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+                "paused" => session.update(|s| {
+                    s.phase = "paused".into();
+                    s.message = "录屏已暂停".into();
+                }),
+                "resumed" => session.update(|s| {
+                    s.phase = "recording".into();
+                    s.message = "原生录屏进行中".into();
+                }),
+                "saved" => {
+                    saved = true;
+                }
+                "error" => {
+                    message = value["message"].as_str().unwrap_or("原生录屏失败").into();
+                }
+                _ => {}
+            }
+        }
+        let _ = child.lock().wait();
+        if saved && mix_audio {
+            session.update(|status| {
+                status.phase = "saving".into();
+                status.message = "正在合并系统声音和麦克风…".into();
+            });
+            if let Err(error) = crate::studio::mix_recording_audio(&app, &temporary) {
+                saved = false;
+                message = error;
+            }
+        }
+        let bytes = std::fs::metadata(&temporary).map(|m| m.len()).unwrap_or(0);
+        if saved && bytes > 0 {
+            let commit = if destination == path {
+                std::fs::rename(&temporary, &destination)
+            } else {
+                std::fs::hard_link(&temporary, &destination)
+                    .and_then(|_| std::fs::remove_file(&temporary))
+            };
+            if let Err(error) = commit {
+                saved = false;
+                message = format!("视频提交失败：{error}");
+            }
+        } else {
+            saved = false;
+        }
+        let final_path = if saved {
+            Some(destination)
+        } else if bytes > 0 {
+            let recovery = path.with_file_name(format!(
+                "{}-未完成-{}.mp4",
+                path.file_stem().unwrap_or_default().to_string_lossy(),
+                &Uuid::new_v4().simple().to_string()[..8]
+            ));
+            if std::fs::rename(&temporary, &recovery).is_ok() {
+                Some(recovery)
+            } else {
+                Some(temporary.clone())
+            }
+        } else {
+            let _ = std::fs::remove_file(&temporary);
+            None
+        };
+        session.native_running.store(false, Ordering::Release);
+        session.update(|status| {
+            status.phase = if saved { "saved" } else { "error" }.into();
+            status.message = if saved {
+                "录屏已保存".into()
+            } else {
+                message
+            };
+            status.bytes_written = bytes;
+            status.file_path = final_path.map(|p| p.to_string_lossy().into_owned());
+        });
+        if session.url.is_empty() {
+            session.shutdown.store(true, Ordering::Release);
+        }
+    });
+    Ok(())
 }
 
 fn available_browsers() -> Vec<(String, String, PathBuf)> {
@@ -1155,12 +1358,20 @@ pub fn get_recording_browsers() -> Vec<serde_json::Value> {
 fn open_browser(url: &str, preference: Option<&str>) -> Result<(), String> {
     let (_, browser) = recording_browser(preference)?;
     #[cfg(target_os = "macos")]
-    let result = {
-        let mut command = Command::new("open");
-        if let Some(browser) = browser {
-            command.arg("-a").arg(browser);
-        }
-        command.arg(url).status().and_then(|status| {
+    let result = if let Some(browser) = browser {
+        let executable = browser
+            .join("Contents/MacOS")
+            .join(browser.file_stem().unwrap());
+        Command::new(executable)
+            .arg(format!("--app={url}"))
+            .spawn()
+            .map(|mut child| {
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            })
+    } else {
+        Command::new("open").arg(url).status().and_then(|status| {
             if status.success() {
                 Ok(())
             } else {
@@ -1173,7 +1384,7 @@ fn open_browser(url: &str, preference: Option<&str>) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         if let Some(browser) = browser {
             Command::new(browser)
-                .arg(url)
+                .arg(format!("--app={url}"))
                 .creation_flags(0x08000000)
                 .spawn()
                 .map(|_| ())
@@ -1221,12 +1432,13 @@ pub fn start_recording_session(
         }
     });
     let (browser, _) = recording_browser(options.browser.as_deref())?;
-    let prepared = state.prepare(options, path.into(), browser, sink)?;
+    let prepared =
+        state.prepare_with_app(options, path.into(), browser, sink, Some(app.clone()))?;
     let preference = state
         .current
         .lock()
         .as_ref()
-        .and_then(|session| session.options.browser.clone());
+        .and_then(|session| session.status.lock().options.browser.clone());
     if let Err(error) = open_browser(&prepared.url, preference.as_deref()) {
         let _ = state.control("cancel");
         return Err(error);
@@ -1249,7 +1461,8 @@ pub fn reopen_recording_browser(state: State<'_, RecordingManager>) -> Result<()
     if session.connected.load(Ordering::Acquire) {
         return Err("录屏页面已打开，请切回浏览器继续选择".into());
     }
-    open_browser(&session.url, session.options.browser.as_deref())
+    let browser = session.status.lock().options.browser.clone();
+    open_browser(&session.url, browser.as_deref())
 }
 
 #[tauri::command]

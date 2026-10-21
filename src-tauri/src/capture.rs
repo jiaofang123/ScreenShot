@@ -40,6 +40,7 @@ pub struct AppState {
 struct RecordingSelectionRequest {
     session_id: u64,
     monitor_id: u32,
+    restore_main: bool,
     reply: async_runtime::Sender<Option<RecordingSelection>>,
 }
 
@@ -212,6 +213,7 @@ pub async fn begin_capture_impl(app: AppHandle) -> Result<(), String> {
 pub async fn select_recording_region(
     app: AppHandle,
     monitor_id: u32,
+    restore_main: Option<bool>,
 ) -> Result<Option<RecordingSelection>, String> {
     let state = app.state::<AppState>();
     ensure_screen_capture_permission(&app)?;
@@ -234,6 +236,7 @@ pub async fn select_recording_region(
     *state.recording_selection.lock() = Some(RecordingSelectionRequest {
         session_id,
         monitor_id,
+        restore_main: restore_main.unwrap_or(true),
         reply,
     });
     let prepared = begin_capture_session(app.clone(), session_id, Some(monitor_id)).await;
@@ -265,10 +268,16 @@ async fn begin_capture_session(
 
     // Capture only after ordering the tool out. The shared capture path also waits
     // for the window server/cursor update before reading the desktop pixels.
-    let snapshots =
-        async_runtime::spawn_blocking(move || capture_all_monitors(session_id, target_monitor))
-            .await
-            .map_err(|error| format!("截图任务异常：{error}"))??;
+    let snapshot_helper = if target_monitor.is_some() && cfg!(target_os = "macos") {
+        Some(crate::studio::resource(&app, "runtime/screenshot-recorder"))
+    } else {
+        None
+    };
+    let snapshots = async_runtime::spawn_blocking(move || {
+        capture_all_monitors(session_id, target_monitor, snapshot_helper)
+    })
+    .await
+    .map_err(|error| format!("截图任务异常：{error}"))??;
     if app
         .state::<AppState>()
         .overlay_session
@@ -364,6 +373,7 @@ fn ensure_overlay_window(
             .decorations(false)
             .resizable(false)
             .always_on_top(true)
+            .content_protected(true)
             .skip_taskbar(true)
             .visible(false);
         if cfg!(target_os = "macos") {
@@ -515,8 +525,8 @@ pub fn finish_recording_region_selection(
     state.overlay_session.fetch_add(1, Ordering::AcqRel);
     state.snapshots.lock().clear();
     hide_overlay_windows(&app);
-    show_main_window(&app);
     if let Some(request) = state.recording_selection.lock().take() {
+        restore_after_recording_selection(&app, request.restore_main);
         let _ = request.reply.try_send(Some(selection));
     }
     Ok(())
@@ -685,11 +695,21 @@ pub fn cancel_capture(app: AppHandle, state: State<'_, AppState>) {
     state.overlay_session.fetch_add(1, Ordering::AcqRel);
     state.snapshots.lock().clear();
     hide_overlay_windows(&app);
-    show_main_window(&app);
     if let Some(request) = state.recording_selection.lock().take() {
+        restore_after_recording_selection(&app, request.restore_main);
         let _ = request.reply.try_send(None);
     } else {
+        show_main_window(&app);
         let _ = app.emit_to("main", "capture-cancelled", ());
+    }
+}
+
+fn restore_after_recording_selection(app: &AppHandle, restore_main: bool) {
+    if restore_main {
+        show_main_window(app);
+    } else {
+        #[cfg(target_os = "macos")]
+        let _ = app.hide();
     }
 }
 
@@ -795,6 +815,7 @@ fn capture_live_region(monitor: &Monitor, region: &CaptureRegion) -> Result<Rgba
 fn capture_all_monitors(
     session_id: u64,
     target_monitor: Option<u32>,
+    snapshot_helper: Option<std::path::PathBuf>,
 ) -> Result<HashMap<u32, MonitorSnapshot>, String> {
     let monitors = Monitor::all().map_err(|error| format!("无法读取显示器：{error}"))?;
     let monitors: Vec<_> = monitors
@@ -807,9 +828,13 @@ fn capture_all_monitors(
     let mut snapshots = HashMap::new();
     for monitor in monitors {
         let id = monitor.id().map_err(|error| error.to_string())?;
-        let image = monitor
-            .capture_image()
-            .map_err(|error| screen_capture_error(format!("无法捕获显示器 {id}：{error}")))?;
+        let image = if let Some(helper) = &snapshot_helper {
+            filtered_recording_snapshot(helper, id)?
+        } else {
+            monitor
+                .capture_image()
+                .map_err(|error| screen_capture_error(format!("无法捕获显示器 {id}：{error}")))?
+        };
         let scale_factor = monitor.scale_factor().unwrap_or(1.0);
         snapshots.insert(
             id,
@@ -841,6 +866,42 @@ fn capture_all_monitors(
     } else {
         Ok(snapshots)
     }
+}
+
+fn filtered_recording_snapshot(
+    helper: &std::path::Path,
+    monitor_id: u32,
+) -> Result<RgbaImage, String> {
+    use std::process::{Command, Stdio};
+    let temporary = tempfile::Builder::new()
+        .suffix(".png")
+        .tempfile()
+        .map_err(|e| e.to_string())?;
+    let mut child = Command::new(helper)
+        .arg("snapshot")
+        .arg(monitor_id.to_string())
+        .arg(temporary.path())
+        .arg(std::process::id().to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("无法准备桌面框选：{e}"))?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait().map_err(|e| e.to_string())? {
+            Some(status) if status.success() => break,
+            Some(_) => return Err("无法获取排除工具窗口的桌面画面，请检查屏幕录制权限".into()),
+            None if started.elapsed() > Duration::from_secs(10) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("桌面画面获取超时，请重新框选".into());
+            }
+            None => thread::sleep(Duration::from_millis(15)),
+        }
+    }
+    image::open(temporary.path())
+        .map(|image| image.into_rgba8())
+        .map_err(|e| e.to_string())
 }
 
 fn crop_snapshot(state: &AppState, region: &CaptureRegion) -> Result<RgbaImage, String> {
@@ -1160,6 +1221,7 @@ mod tests {
         *state.recording_selection.lock() = Some(RecordingSelectionRequest {
             session_id: 7,
             monitor_id: 1,
+            restore_main: true,
             reply,
         });
         region.x = 2;

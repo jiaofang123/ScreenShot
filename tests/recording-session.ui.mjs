@@ -40,6 +40,7 @@ await page.addInitScript(() => {
       }
       if (cmd === 'start_native_recording' || cmd === 'start_recording_session') {
         const value = { id: `new-recording-${next++}`, mode: args.options.mode, phase: cmd === 'start_native_recording' ? 'recording' : 'waiting', browser: 'Google Chrome', message: '本次录屏已开始', elapsedMs: 0, bytesWritten: 0, width: 640, height: 360, filePath: null };
+        if(cmd === 'start_recording_session')value.controllerId=value.id;
         window.statusEvent(value);
         if (window.completeBeforeReturn) window.statusEvent({ ...value, phase: 'saved', message: '录屏已保存', filePath: '/tmp/ScreenShot-current.mp4' });
         return value;
@@ -94,6 +95,23 @@ try {
   await page.getByRole('button', { name: '开始录屏', exact: true }).click();
   await editor.locator('#assetCount').getByText('3', { exact: true }).waitFor({ timeout: 10000 });
   assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4', '/tmp/ScreenShot-new-tab.mp4', '/tmp/ScreenShot-current.mp4']);
+  // Repeated rounds from an owned browser controller can use new recording IDs.
+  await page.getByRole('button',{name:'录屏',exact:true}).click();
+  await page.getByRole('radio',{name:/浏览器页签/}).check();
+  await page.evaluate(()=>{window.completeBeforeReturn=false;});
+  await page.getByRole('button',{name:'开始录屏',exact:true}).click();
+  await page.getByRole('button',{name:'取消录屏',exact:true}).waitFor();
+  const root=await page.evaluate(()=>({...window.recordStatus}));
+  await page.evaluate(root=>window.statusEvent({...root,phase:'saved',message:'第一段已保存',filePath:'/tmp/controller-first.mp4'}),root);
+  await page.getByText('第一段已保存',{exact:true}).waitFor();
+  const next={...root,id:'controller-second',controllerId:root.id,phase:'recording',message:'正在录制第二段'};
+  await page.evaluate(next=>window.statusEvent(next),next);
+  await page.getByText('正在录制第二段',{exact:true}).waitFor();
+  await page.evaluate(()=>window.statusEvent(window.previousRecording));await settle();
+  await page.getByText('正在录制第二段',{exact:true}).waitFor();
+  await page.evaluate(next=>window.statusEvent({...next,phase:'saved',message:'第二段已保存',filePath:'/tmp/controller-second.mp4'}),next);
+  await page.getByText('第二段已保存',{exact:true}).waitFor();
+  assert.deepEqual(await importedPaths(), ['/tmp/ScreenShot-current.mp4', '/tmp/ScreenShot-new-tab.mp4', '/tmp/ScreenShot-current.mp4']);
   assert.deepEqual(errors, []);
-  console.log('PASS: stale/deleted snapshot, stale events, cancelled start, native/tab ownership, fast completion, repeated file path, single import per recording');
+  console.log('PASS: stale/deleted snapshot, stale events, cancelled start, native/tab ownership, fast completion, repeated file path, controller continuation, single import per recording');
 } finally { await browser.close(); }

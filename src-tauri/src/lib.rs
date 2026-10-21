@@ -156,6 +156,9 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_content_protected(true)?;
+            }
             studio::restore_layouts(app.handle());
             let recording_shortcut = app
                 .global_shortcut()

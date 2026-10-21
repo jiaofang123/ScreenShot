@@ -13,6 +13,13 @@ mod recording;
 mod studio;
 mod capture {
     pub fn show_main_window(_: &tauri::AppHandle) {}
+    pub async fn select_recording_region(
+        _: tauri::AppHandle,
+        _: u32,
+        _: Option<bool>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        Err("Synthetic test does not capture the desktop".into())
+    }
 }
 #[path = "../src/image_utils.rs"]
 #[allow(dead_code)]

@@ -3,6 +3,8 @@ import Foundation
 import ScreenCaptureKit
 import AVFoundation
 import CoreMedia
+import CoreImage
+import ImageIO
 
 func emit(_ value: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: value), let line = String(data: data, encoding: .utf8) { print(line); fflush(stdout) }
@@ -12,7 +14,61 @@ struct Options: Decodable {
     var mode: String; var sourceId: UInt32; var fps: Int; var audio: Bool
     var microphone: Bool?; var cursor: Bool?; var clicks: Bool?; var originalResolution: Bool
     var crop: Crop?
+    var excludedProcessIDs: [Int32]?
     struct Crop: Decodable { var x: Double; var y: Double; var width: Double; var height: Double }
+}
+
+// Keep controller windows separate from ordinary Chrome windows. Never exclude
+// Chrome as an application: its other windows are legitimate recording targets.
+func isRecorderController(_ title: String?) -> Bool {
+    (title ?? "").contains("ScreenShot · 本机录屏")
+}
+
+@available(macOS 13.0, *)
+func isToolApplication(_ application: SCRunningApplication?, excluding processes: [Int32]) -> Bool {
+    guard let application = application else { return false }
+    return application.bundleIdentifier == "com.amamda.screenshot" || processes.contains(application.processID)
+}
+
+@available(macOS 13.0, *)
+func desktopFilter(_ display: SCDisplay, content: SCShareableContent, excluding processes: [Int32]) -> SCContentFilter {
+    let own = content.applications.filter { isToolApplication($0, excluding: processes) }
+    // Exceptions invert the application rule. Include only controller windows
+    // belonging to other applications, so no tool window is accidentally restored.
+    let controllers = content.windows.filter { !isToolApplication($0.owningApplication, excluding: processes) && isRecorderController($0.title) }
+    let filter = SCContentFilter(display: display, excludingApplications: own, exceptingWindows: controllers)
+    if #available(macOS 14.2, *) { filter.includeMenuBar = false }
+    return filter
+}
+
+@available(macOS 13.0, *)
+final class DesktopSnapshot: NSObject, SCStreamOutput, @unchecked Sendable {
+    var continuation: CheckedContinuation<CVPixelBuffer, Error>?
+    func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, let pixels = sample.imageBuffer,
+              let attachment = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo:Any]],
+              attachment.first?[.status] as? Int == SCFrameStatus.complete.rawValue,
+              let reply = continuation else { return }
+        continuation = nil; reply.resume(returning: pixels)
+    }
+    func capture(_ displayID: UInt32, path: String, excluding processes: [Int32]) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
+        guard let display = content.displays.first(where: { $0.displayID == displayID }) else { throw NSError(domain:"ScreenShot",code:2,userInfo:[NSLocalizedDescriptionKey:"屏幕不可用，请重新选择"]) }
+        let config = SCStreamConfiguration(); config.width = display.width; config.height = display.height; config.showsCursor = false
+        let stream = SCStream(filter:desktopFilter(display,content:content,excluding:processes),configuration:config,delegate:nil)
+        try stream.addStreamOutput(self,type:.screen,sampleHandlerQueue:DispatchQueue(label:"ScreenShot.snapshot"))
+        let pixels: CVPixelBuffer = try await withCheckedThrowingContinuation { reply in
+            continuation = reply
+            Task { do { try await stream.startCapture() } catch { if let pending = continuation { continuation = nil; pending.resume(throwing:error) } } }
+        }
+        try? await stream.stopCapture()
+        let context = CIContext()
+        guard let image = context.createCGImage(CIImage(cvPixelBuffer:pixels), from:CGRect(x:0,y:0,width:CVPixelBufferGetWidth(pixels),height:CVPixelBufferGetHeight(pixels))),
+              let destination = CGImageDestinationCreateWithURL(URL(fileURLWithPath:path) as CFURL,"public.png" as CFString,1,nil) else { throw NSError(domain:"ScreenShot",code:7) }
+        CGImageDestinationAddImage(destination,image,nil)
+        guard CGImageDestinationFinalize(destination) else { throw NSError(domain:"ScreenShot",code:8) }
+        emit(["event":"snapshotSaved"])
+    }
 }
 
 @available(macOS 13.0, *)
@@ -23,6 +79,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
     var audio: AVAssetWriterInput?
     var microphone: AVAssetWriterInput?
     var stream: SCStream?
+    var systemAudioStream: SCStream?
     var start = CMTime.invalid, offset = CMTime.zero, pauseAt = CMTime.invalid
     var paused = false, finishing = false
     var lastVideo: CMSampleBuffer?
@@ -65,21 +122,28 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
 
     func prepare(_ options: Options, path: String) async throws {
         if options.microphone == true, !(await AVCaptureDevice.requestAccess(for:.audio)) { throw NSError(domain:"ScreenShot",code:6,userInfo:[NSLocalizedDescriptionKey:"麦克风未授权，请在系统设置中允许 ScreenShot 使用麦克风"]) }
-        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
         let config = SCStreamConfiguration()
         let filter: SCContentFilter
+        var systemAudioFilter: SCContentFilter?
         let sourceSize: CGSize
         let scale: CGFloat
         if options.mode == "window" {
             guard let window = content.windows.first(where: { $0.windowID == options.sourceId }) else { throw NSError(domain:"ScreenShot", code:1, userInfo:[NSLocalizedDescriptionKey:"窗口已关闭，请刷新录制来源"] ) }
+            guard !isToolApplication(window.owningApplication,excluding:options.excludedProcessIDs ?? []), !isRecorderController(window.title) else { throw NSError(domain:"ScreenShot",code:9,userInfo:[NSLocalizedDescriptionKey:"不能录制 ScreenShot 工具或录屏控制页，请选择其他窗口"]) }
             filter = SCContentFilter(desktopIndependentWindow: window)
             sourceSize = window.frame.size
             scale = 2
         } else {
             guard let display = content.displays.first(where: { $0.displayID == options.sourceId }) else { throw NSError(domain:"ScreenShot", code:2, userInfo:[NSLocalizedDescriptionKey:"屏幕不可用，请重新选择"] ) }
-            // Exclude ScreenShot's own windows from desktop and region captures.
-            let own = content.applications.filter { $0.bundleIdentifier == "com.amamda.screenshot" }
-            filter = SCContentFilter(display: display, excludingApplications: own, exceptingWindows: [])
+            filter = desktopFilter(display,content:content,excluding:options.excludedProcessIDs ?? [])
+            if options.audio {
+                // Window exceptions can affect audio for the entire browser app.
+                // Keep system audio on a separate audio-only stream, excluding
+                // ScreenShot while retaining sound from ordinary browser tabs.
+                let own = content.applications.filter { isToolApplication($0,excluding:options.excludedProcessIDs ?? []) }
+                systemAudioFilter = SCContentFilter(display:display,excludingApplications:own,exceptingWindows:[])
+            }
             scale = CGFloat(display.width) / max(1, display.frame.width)
             if let crop = options.crop, options.mode == "region" {
                 let region = CGRect(x: crop.x * display.frame.width, y: crop.y * display.frame.height, width: crop.width * display.frame.width, height: crop.height * display.frame.height)
@@ -95,7 +159,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         config.queueDepth = 5
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = options.cursor ?? true
-        config.capturesAudio = options.audio; config.sampleRate = 48000; config.channelCount = 2
+        config.capturesAudio = options.audio && systemAudioFilter == nil; config.sampleRate = 48000; config.channelCount = 2
         config.excludesCurrentProcessAudio = true
         if #available(macOS 15.0, *) { config.captureMicrophone = options.microphone ?? false; config.showMouseClicks = options.clicks ?? false }
         else if options.microphone == true { throw NSError(domain:"ScreenShot", code:4, userInfo:[NSLocalizedDescriptionKey:"原生麦克风录制需要 macOS 15 或更新版本"] ) }
@@ -113,10 +177,19 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         guard writer.startWriting() else { throw writer.error ?? NSError(domain:"ScreenShot", code:5) }
         let stream = SCStream(filter:filter, configuration:config, delegate:self)
         try stream.addStreamOutput(self, type:.screen, sampleHandlerQueue:queue)
-        if options.audio { try stream.addStreamOutput(self, type:.audio, sampleHandlerQueue:queue) }
+        if config.capturesAudio { try stream.addStreamOutput(self, type:.audio, sampleHandlerQueue:queue) }
         if #available(macOS 15.0, *), options.microphone == true { try stream.addStreamOutput(self, type:.microphone, sampleHandlerQueue:queue) }
         self.stream = stream
         try await stream.startCapture()
+        if let audioFilter = systemAudioFilter {
+            let audioConfig = SCStreamConfiguration()
+            audioConfig.width = 2; audioConfig.height = 2; audioConfig.minimumFrameInterval = CMTime(value:1,timescale:1)
+            audioConfig.capturesAudio = true; audioConfig.sampleRate = 48000; audioConfig.channelCount = 2; audioConfig.excludesCurrentProcessAudio = true
+            let audioStream = SCStream(filter:audioFilter,configuration:audioConfig,delegate:self)
+            try audioStream.addStreamOutput(self,type:.audio,sampleHandlerQueue:queue)
+            self.systemAudioStream = audioStream
+            try await audioStream.startCapture()
+        }
         emit(["event":"started", "width":config.width, "height":config.height, "hasAudio":options.audio || options.microphone == true])
     }
     func control(_ action: String) {
@@ -131,6 +204,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
         let allowed = queue.sync { () -> Bool in if finishing { return false }; finishing = true; return true }
         guard allowed else { return }
         try? await stream?.stopCapture()
+        try? await systemAudioStream?.stopCapture()
         queue.sync {
             if start.isValid, let last = lastVideo, video.isReadyForMoreMediaData {
                 let end = (paused ? pauseAt : CMClockGetTime(CMClockGetHostTimeClock())) - offset
@@ -148,7 +222,11 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sen
 @available(macOS 13.0, *)
 func run() async {
     do {
+        if CommandLine.arguments.count > 4, CommandLine.arguments[1] == "snapshot" {
+            try await DesktopSnapshot().capture(UInt32(CommandLine.arguments[2])!,path:CommandLine.arguments[3],excluding:[Int32(CommandLine.arguments[4])!]);return
+        }
         if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "self-test" {
+            guard isRecorderController("ScreenShot · 本机录屏 - Google Chrome"), !isRecorderController("普通网页 - Google Chrome"), !isRecorderController("ScreenShot 使用教程") else { throw NSError(domain:"SelfTest",code:4) }
             // Synthetic frames exercise the native writer and pause timestamp adjustment without accessing any screen.
             let target = URL(fileURLWithPath: CommandLine.arguments[2])
             let writer = try AVAssetWriter(outputURL:target,fileType:.mp4)
@@ -181,7 +259,8 @@ func run() async {
         if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "list" {
             let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly:true)
             var sources: [[String:Any]] = content.displays.map { ["id":$0.displayID,"kind":"desktop","name":"屏幕 \($0.displayID)","width":$0.width,"height":$0.height] }
-            sources += content.windows.filter { $0.owningApplication?.bundleIdentifier != "com.amamda.screenshot" && $0.frame.width > 80 && $0.frame.height > 60 && !($0.title ?? "").isEmpty }.map {
+            let excluded = CommandLine.arguments.count > 2 ? [Int32(CommandLine.arguments[2]) ?? 0] : []
+            sources += content.windows.filter { !isToolApplication($0.owningApplication,excluding:excluded) && !isRecorderController($0.title) && $0.frame.width > 80 && $0.frame.height > 60 && !($0.title ?? "").isEmpty }.map {
                 ["id":$0.windowID,"kind":"window","name":"\($0.owningApplication?.applicationName ?? "应用") · \($0.title ?? "窗口")","width":Int($0.frame.width),"height":Int($0.frame.height)]
             }
             emit(["sources":sources]); return

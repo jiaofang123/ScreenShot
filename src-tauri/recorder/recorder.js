@@ -5,14 +5,17 @@ const phases = { waiting: '等待选择', selecting: '调整选区', countdown: 
 let config, socket, sourceStream, outputStream, recorder, cropWorker;
 let phase = 'waiting', startedAt = 0, endedAt = 0, pauseStarted = 0, pausedMs = 0, lastFlush = 0, nextSequence = 0, pendingBytes = 0;
 let uploadQueue = Promise.resolve(), uploadError = null, finishing = false, cancelled = false, stopRequested = false;
-let crop = null, drag = null;
+let crop = null, drag = null, nativeCrop = null, nativeSources = [], preparing = false;
 
 function notice(message) { $('notice').textContent = message; $('notice').hidden = !message; }
 function setPhase(value) {
   phase = value; $('phase').textContent = phases[value] || value;
   const active = ['recording', 'paused'].includes(value);
-  $('choose').hidden = value !== 'waiting';
-  $('choose').disabled = !socket || socket.readyState !== WebSocket.OPEN;
+  const idle = ['waiting', 'saved', 'cancelled', 'error'].includes(value);
+  $('settings').disabled = !idle || preparing;
+  $('choose').hidden = !idle;
+  $('choose').textContent = value === 'waiting' ? (usesNative() ? '开始录制' : `选择${$('mode').value === 'region' ? '屏幕并框选' : names[$('mode').value]}并开始录制`) : '继续新录制';
+  $('choose').disabled = preparing || !socket || socket.readyState !== WebSocket.OPEN || (usesNative() && (!$('target').value || ($('mode').value === 'region' && !nativeCrop)));
   $('start').hidden = value !== 'selecting';
   $('pause').hidden = !active;
   $('pause').textContent = value === 'paused' ? '继续录制' : '暂停';
@@ -27,7 +30,7 @@ function updateClock() {
 }
 async function api(route, data, binary = false) {
   const response = await fetch(new URL(route, base), {
-    method: 'POST', headers: { 'Content-Type': binary ? 'application/octet-stream' : 'application/json' },
+    method: 'POST', headers: { 'Content-Type': binary ? 'application/octet-stream' : 'application/json', 'X-Recording-Id': config?.status?.id || '' },
     body: binary ? data : JSON.stringify(data ?? {}),
   });
   const result = await response.json();
@@ -56,10 +59,15 @@ async function stop() {
   } else if (phase !== 'countdown') {
     cancelled = true; cleanup();
     try { await api('cancel'); } catch {}
-    setPhase('cancelled'); notice('录屏已取消，可以回到 ScreenShot 重新开始。');
+    setPhase('cancelled'); notice('录屏已取消，可在此页选择方式并继续新录制。');
   }
 }
 async function applyControl(data, heartbeat = false) {
+  if (data.status && data.status.id !== config?.status?.id) return;
+  if (config?.nativeCapture && config.options.mode !== 'tab') {
+    if (data.status?.id === config.status.id) syncNativeStatus(data.status);
+    return;
+  }
   updateClock();
   if (data.command === 'stop' || data.command === 'cancel') { await stop(); return; }
   if (!recorder || finishing) return;
@@ -150,7 +158,7 @@ async function startRecording() {
       try {
         const result = await api('finish', { chunks: nextSequence, elapsedMs: duration });
         setPhase('saved'); $('preview-wrap').hidden = true; $('saved').hidden = false;
-        $('saved-path').textContent = result.path; notice('视频已保存，可回到 ScreenShot 打开所在文件夹。');
+        $('saved-path').textContent = result.path; notice('视频已保存，可在此页继续新录制或切换录制方式。');
       } catch (error) { await reportError(error); }
     };
     startedAt = performance.now(); recorder.start(1000); setPhase('recording');
@@ -163,36 +171,115 @@ async function startRecording() {
   finally { $('start').disabled = false; }
 }
 
-$('choose').onclick = async () => {
-  if (phase !== 'waiting') return;
-  $('choose').disabled = true; notice(''); cancelled = false; stopRequested = false;
+function readOptions() {
+  return { mode: $('mode').value, fps: Number($('fps').value), audio: $('audio').checked, originalResolution: $('quality').value === '4k', browser: config?.options.browser || null };
+}
+function usesNative() { return config?.nativeCapture && $('mode').value !== 'tab'; }
+function showSaved(path) {
+  $('saved').hidden = false; $('saved-path').textContent = path || '';
+  $('preview-wrap').hidden = true;
+  notice('视频已保存，可在此页继续新录制或切换录制方式。');
+}
+function syncNativeStatus(status) {
+  if (status.phase === 'waiting') return;
+  setPhase(status.phase);
+  const seconds = Math.floor(status.elapsedMs / 1000);
+  $('elapsed').textContent = `${Math.floor(seconds / 60).toString().padStart(2,'0')}:${(seconds % 60).toString().padStart(2,'0')}`;
+  $('source').textContent = `${names[status.mode]} · ${status.width} × ${status.height}`;
+  $('format').textContent = `MP4 · ${status.hasAudio ? '含共享声音' : '仅画面'}`;
+  if (status.phase === 'saved') showSaved(status.filePath);
+  else if (status.phase === 'error') notice(status.message);
+  else if (status.phase === 'recording') notice('录屏进行中。ScreenShot 工具和录屏控制窗口已从画面中排除。');
+}
+async function prepareRound() {
+  const wanted = readOptions();
+  if (phase === 'waiting' && Object.entries(wanted).every(([key,value]) => config.options[key] === value)) return;
+  const result = await api('restart', wanted);
+  config.options = wanted; config.status = result.status;
+  recorder = null; finishing = false; cancelled = false; stopRequested = false;
+  startedAt = endedAt = pauseStarted = pausedMs = lastFlush = nextSequence = pendingBytes = 0;
+  uploadQueue = Promise.resolve(); uploadError = null; crop = drag = null;
+  $('saved').hidden = true; $('metrics').hidden = true; $('elapsed').textContent = '00:00';
+  setPhase('waiting');
+}
+async function refreshNativeSources() {
+  $('native-target').hidden = !usesNative();
+  $('select-region').hidden = !usesNative() || $('mode').value !== 'region';
+  $('title').textContent = `录制${names[$('mode').value]}`;
+  if (!usesNative()) { setPhase(phase); return; }
+  nativeSources = await api('native-sources');
+  const previous = $('target').value, kind = $('mode').value === 'window' ? 'window' : 'desktop';
+  $('target').replaceChildren(...nativeSources.filter(source => source.kind === kind).map(source => new Option(source.name, String(source.id))));
+  if ([...$('target').options].some(option => option.value === previous)) $('target').value = previous;
+  setPhase(phase);
+}
+async function startNative() {
+  const target = nativeSources.find(source => String(source.id) === $('target').value && source.kind === (config.options.mode === 'window' ? 'window' : 'desktop'));
+  if (!target || (config.options.mode === 'region' && !nativeCrop)) throw new Error('请先选择录制目标和范围。');
+  setPhase('countdown');
+  for (let seconds = 3; seconds > 0; seconds--) {
+    notice(`${seconds} 秒后开始录制…`); await new Promise(resolve => setTimeout(resolve,1000));
+    if (stopRequested) { await api('cancel'); setPhase('cancelled'); return; }
+  }
+  await api('native-begin', { sourceId:target.id, name:target.name, crop:config.options.mode === 'region' ? nativeCrop : null, microphone:false, cursor:true, clicks:false });
+  notice('正在启动本机录制，工具和控制窗口将从画面中排除…');
+}
+$('mode').onchange = () => {
+  nativeCrop = null; $('region-size').textContent = '';
+  void refreshNativeSources().catch(error => notice(error.message));
+};
+$('target').onchange = () => { nativeCrop = null; $('region-size').textContent = ''; setPhase(phase); };
+$('refresh').onclick = () => { void refreshNativeSources().catch(error => notice(error.message)); };
+$('select-region').onclick = async () => {
+  if (preparing) return;
+  preparing = true; setPhase(phase); notice('请在桌面上框选；Enter 确认，Esc 取消。');
   try {
+    await prepareRound();
+    const selected = await api('native-region', { monitorId:Number($('target').value) });
+    if (selected) { nativeCrop = selected.crop; $('region-size').textContent = `${selected.width} × ${selected.height} 像素`; }
+    notice('');
+  } catch (error) { notice(error.message); }
+  finally { preparing = false; setPhase(phase); }
+};
+$('reveal').onclick = () => { void api('reveal').catch(error => notice(error.message)); };
+
+$('choose').onclick = async () => {
+  if (preparing || !['waiting','saved','cancelled','error'].includes(phase)) return;
+  preparing = true; $('choose').disabled = true; $('settings').disabled = true; notice(''); cancelled = false; stopRequested = false;
+  try {
+    if (usesNative()) { await prepareRound(); await startNative(); return; }
+    const wanted = readOptions();
     if (!navigator.mediaDevices?.getDisplayMedia || !window.MediaRecorder) throw new Error('当前浏览器不支持录屏，请使用新版 Chrome 或 Edge 打开此页。');
-    const surface = { window: 'window', tab: 'browser', desktop: 'monitor', region: 'monitor' }[config.options.mode];
+    const surface = { window: 'window', tab: 'browser', desktop: 'monitor', region: 'monitor' }[wanted.mode];
     const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: surface, frameRate: { ideal: config.options.fps, max: config.options.fps },
-        width: { ideal: config.options.originalResolution ? 3840 : 1920, max: config.options.originalResolution ? 3840 : 1920 },
-        height: { ideal: config.options.originalResolution ? 2160 : 1080, max: config.options.originalResolution ? 2160 : 1080 } },
-      audio: config.options.audio,
+      video: { displaySurface: surface, frameRate: { ideal: wanted.fps, max: wanted.fps },
+        width: { ideal: wanted.originalResolution ? 3840 : 1920, max: wanted.originalResolution ? 3840 : 1920 },
+        height: { ideal: wanted.originalResolution ? 2160 : 1080, max: wanted.originalResolution ? 2160 : 1080 } },
+      audio: wanted.audio,
       selfBrowserSurface: 'exclude', surfaceSwitching: 'exclude',
-      monitorTypeSurfaces: ['window', 'tab'].includes(config.options.mode) ? 'exclude' : 'include',
-      systemAudio: config.options.audio ? 'include' : 'exclude',
+      monitorTypeSurfaces: ['window', 'tab'].includes(wanted.mode) ? 'exclude' : 'include',
+      systemAudio: wanted.audio ? 'include' : 'exclude',
     });
+    sourceStream = stream;
+    if (cancelled || stopRequested) { cleanup(); return; }
+    await prepareRound();
     sourceStream = stream;
     if (cancelled || stopRequested) { cleanup(); return; }
     const videoTrack = stream.getVideoTracks()[0];
     const actual = videoTrack.getSettings().displaySurface;
     if (!actual) { cleanup(); throw new Error('当前浏览器无法确认录制来源类型，请使用 Chrome 或 Edge。'); }
     if (actual !== surface) {
-      cleanup(); throw new Error(`请在共享面板选择${names[config.options.mode]}，当前选择的来源类型不符。`);
+      cleanup(); throw new Error(`请在共享面板选择${names[wanted.mode]}，当前选择的来源类型不符。`);
     }
+    if (videoTrack.getCaptureHandle?.()?.handle === 'screenshot-recorder' || /ScreenShot · 本机录屏/.test(videoTrack.label)) { cleanup(); throw new Error('不能录制 ScreenShot 录屏控制页，请选择其他标签页或窗口。'); }
+    videoTrack.addEventListener('capturehandlechange', () => { if (videoTrack.getCaptureHandle?.()?.handle === 'screenshot-recorder') { notice('已停止：目标切换到了 ScreenShot 录屏控制页。'); void stop(); } });
     videoTrack.contentHint = 'motion'; videoTrack.onended = () => { void stop(); };
     const video = $('preview'); video.srcObject = stream;
     $('preview-wrap').hidden = false;
     await video.play();
     if (!video.videoWidth) await new Promise(resolve => { video.onloadedmetadata = resolve; });
     $('preview-stage').style.width = `min(100%, calc(65vh * ${video.videoWidth / video.videoHeight}))`;
-    if (config.options.mode === 'region') {
+    if (wanted.mode === 'region') {
       if (!window.MediaStreamTrackProcessor || !window.MediaStreamTrackGenerator) { cleanup(); throw new Error('区域录制需要新版 Chrome 或 Edge。'); }
       crop = null; renderCrop(); $('preview-stage').classList.add('selecting'); $('crop-help').hidden = false;
       await api('selecting'); setPhase('selecting'); notice('请在共享画面上拖动框选录制范围，四角可以再次调整。');
@@ -202,13 +289,13 @@ $('choose').onclick = async () => {
     if (!['saved', 'cancelled', 'error'].includes(phase)) {
       setPhase('waiting');
       notice(error.name === 'NotAllowedError' ? '共享已取消或未获屏幕录制权限。可重新选择；macOS 请允许 Chrome/Edge 录制屏幕。' : error.message || String(error));
-    }
-  } finally { if (phase === 'waiting') $('choose').disabled = false; }
+    } else { notice(error.message || String(error)); }
+  } finally { preparing = false; setPhase(phase); }
 };
 $('start').onclick = () => { void startRecording(); };
 $('pause').onclick = () => { void api('control', { action: phase === 'paused' ? 'resume' : 'pause' }).then(applyControl).catch(reportError); };
 $('stop').onclick = () => { void api('control', { action: 'stop' }).then(applyControl).catch(reportError); };
-$('cancel').onclick = () => { void api('control', { action: 'cancel' }).then(applyControl).catch(reportError); };
+$('cancel').onclick = () => { stopRequested = true; void api('control', { action: 'cancel' }).then(applyControl).catch(reportError); };
 
 function pointer(event, offset = { x: 0, y: 0 }) {
   const bounds = $('preview-stage').getBoundingClientRect();
@@ -255,10 +342,13 @@ try {
   if (config.status?.stopShortcutAvailable) $('stop-help').textContent = '停止快捷键：Ctrl/Cmd + Alt + Shift + R · 也可从 ScreenShot 托盘菜单停止录屏';
   $('title').textContent = `录制${names[config.options.mode]}`;
   $('choose').textContent = `选择${config.options.mode === 'region' ? '屏幕并框选' : names[config.options.mode]}${config.options.mode === 'region' ? '' : '并开始录制'}`;
-  $('instructions').textContent = `${config.options.mode === 'tab' ? '请在 Chrome/Edge 的共享面板中选择具体页签，可一并共享页签声音。' : config.options.mode === 'window' ? '请在共享面板选择应用的具体窗口，其他窗口不会进入录制。' : config.options.mode === 'region' ? '先选择一块屏幕，再在实时预览中框选要录制的范围。' : '请在共享面板选择要录制的桌面屏幕。'} 视频将直接保存到 ScreenShot 中选择的位置。`;
-  if (!config.status || !['waiting', 'selecting'].includes(config.status.phase)) throw new Error('录屏会话已开始或结束，请使用原录屏页面。');
+  $('instructions').textContent = config.nativeCapture ? '标签页通过 Chrome/Edge 授权；窗口、屏幕和区域在此页选择并由本机录制。ScreenShot 工具与录屏控制页会从录制中排除。保存后可直接在此页继续。' : '选择共享内容，视频保存在工具中选择的目录。保存后可在此页切换方式或继续新录制。';
+  if (!config.status || !['waiting','saved','cancelled','error'].includes(config.status.phase)) throw new Error('录屏已在其他页面开始，请使用原录屏页面。');
+  $('mode').value = config.options.mode; $('fps').value = String(config.options.fps); $('quality').value = config.options.originalResolution ? '4k' : '1080p'; $('audio').checked = config.options.audio;
+  navigator.mediaDevices?.setCaptureHandleConfig?.({ handle: 'screenshot-recorder', permittedOrigins: ['*'] });
+  await refreshNativeSources();
   socket = new WebSocket(config.webSocketUrl);
-  socket.onopen = () => { setPhase('waiting'); notice(''); };
+  socket.onopen = () => { setPhase(config.status.phase); notice(''); if(config.status.phase === 'saved') showSaved(config.status.filePath); };
   socket.onmessage = ({ data }) => { void applyControl(JSON.parse(data), true).catch(reportError); };
   socket.onerror = () => { notice('无法连接 ScreenShot，请确认应用仍在运行。'); };
   socket.onclose = () => {

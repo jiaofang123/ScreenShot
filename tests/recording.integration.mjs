@@ -47,6 +47,7 @@ async function session(mode, suffix = mode, overrides = {}, format = 'mp4') {
       const stream = canvas.captureStream(20);
       const track = stream.getVideoTracks()[0]; const settings = track.getSettings.bind(track);
       track.getSettings = () => ({ ...settings(), displaySurface: window.testSurface });
+      track.getCaptureHandle = () => window.ownController ? { handle:'screenshot-recorder' } : null;
       track.addEventListener('ended', () => clearInterval(timer));
       if (constraints.audio) {
         const audio = new AudioContext(); const oscillator = audio.createOscillator();
@@ -166,6 +167,57 @@ try {
       throw error;
     } finally { await current.close(); }
   }
+  // One controller supports repeated rounds and all four modes without visiting the tool.
+  const repeated = await session('tab', 'continuous');
+  try {
+    const { page, info } = repeated;
+    const paths = [], savedBytes = [];
+    await page.evaluate(() => { window.ownController = true; });
+    await page.locator('#choose').click();
+    await page.getByText(/不能录制 ScreenShot 录屏控制页/).waitFor();
+    assert.equal(await page.evaluate(() => window.sourceStream.getTracks().every(track => track.readyState === 'ended')), true);
+    await page.evaluate(() => { window.ownController = false; });
+    let previousId;
+    for (const [index, mode] of ['tab','tab','window','region','desktop'].entries()) {
+      await page.locator('#mode').selectOption(mode);
+      await page.evaluate(mode => { window.testSurface = {tab:'browser',window:'window',region:'monitor',desktop:'monitor'}[mode]; }, mode);
+      await page.locator('#choose').click();
+      if(mode === 'region') {
+        await page.getByText('调整选区',{exact:true}).waitFor();
+        const box = await page.locator('#preview-stage').boundingBox();
+        await page.mouse.move(box.x+box.width*.1,box.y+box.height*.1);await page.mouse.down();await page.mouse.move(box.x+box.width*.4,box.y+box.height*.7);await page.mouse.up();
+        await page.locator('#start').click();
+      }
+      await page.getByText('录制中',{exact:true}).waitFor({timeout:15000});
+      assert.equal(await page.locator('#mode').isDisabled(),true);
+      const current = await fetch(new URL('config',info.url)).then(response=>response.json());
+      if(previousId) {
+        const stale = await fetch(new URL('control',info.url),{method:'POST',headers:{'X-Recording-Id':previousId},body:JSON.stringify({action:'stop'})});
+        assert.equal(stale.status,409);
+      }
+      const premature = await fetch(new URL('restart',info.url),{method:'POST',headers:{'X-Recording-Id':current.status.id},body:JSON.stringify(options('desktop'))});
+      assert.equal(premature.status,400);
+      await page.waitForTimeout(1100);
+      await page.locator('#stop').click();
+      await page.getByRole('heading',{name:'视频已保存',exact:true}).waitFor({timeout:20000});
+      const path = await page.locator('#saved-path').textContent();
+      assert.equal(paths.includes(path),false); paths.push(path);savedBytes.push(await readFile(path));
+      assert.equal(await page.locator('#mode').isEnabled(),true);
+      assert.equal(await page.locator('#choose').textContent(),'继续新录制');
+      previousId=current.status.id;
+      if(index === 0) {
+        assert.equal(path,join(directory,'continuous.mp4'));
+        // The previous implementation closed the server 30 seconds after saving.
+        await page.waitForTimeout(31000);
+      }
+      if(index === 1) { await page.reload(); await page.waitForFunction(()=>!document.getElementById('choose').disabled); }
+      for(const [savedIndex,savedPath] of paths.entries()) assert.deepEqual(await readFile(savedPath),savedBytes[savedIndex]);
+    }
+    assert.equal(await page.evaluate(()=>window.captureCalls.every(call=>call.selfBrowserSurface==='exclude'&&call.surfaceSwitching==='exclude')),true);
+    assert.deepEqual(repeated.errors,[]);
+    results.push({mode:'continuous',paths});
+    console.log('PASS: same-page repeated recording, all-mode switching, independent files, idle >30 seconds, reload, stale controls, controller-tab rejection');
+  } finally { await repeated.close(); }
   // Closing the recorder abruptly preserves a distinct, unfinished recording.
   const interrupted = await session('desktop', 'interrupted');
   try {

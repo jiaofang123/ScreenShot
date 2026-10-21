@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { save } from "@tauri-apps/plugin-dialog";
 
 type RecordingMode = "window" | "tab" | "desktop" | "region";
 interface RecordingStatus {
-  id: string; mode: RecordingMode; phase: string; message: string; elapsedMs: number;
+  id: string; controllerId?: string; mode: RecordingMode; phase: string; message: string; elapsedMs: number;
   bytesWritten: number; filePath: string | null; browser: string; sourceName: string;
   width: number; height: number; hasAudio: boolean;
   options?: { fps: number; audio: boolean; originalResolution: boolean; browser: string | null };
@@ -19,7 +19,7 @@ const modes: { value: RecordingMode; icon: string; label: string; description: s
 ];
 const labels: Record<string, string> = { waiting: "等待选择", selecting: "调整选区", recording: "录屏中", paused: "已暂停", saving: "保存中", saved: "已保存", cancelled: "已取消", error: "录屏出错" };
 
-export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVideo, onRecordingStarted }: { onNotify: (message: string) => void; lockedMode: RecordingMode; onEditVideo: (path: string) => void; onRecordingStarted?: (status: RecordingStatus) => void }) {
+export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVideo, onRecordingStarted, onRecordingPreparing }: { onNotify: (message: string) => void; lockedMode: RecordingMode; onEditVideo: (path: string) => void; onRecordingStarted?: (status: RecordingStatus) => void; onRecordingPreparing?: () => void }) {
   const [mode, setMode] = useState<RecordingMode>(lockedMode);
   const [fps, setFps] = useState(30);
   const [audio, setAudio] = useState(true);
@@ -28,9 +28,11 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
   const [browsers, setBrowsers] = useState<{ id: string; name: string }[]>([]);
   const [status, setStatus] = useState<RecordingStatus | null>(null);
   const [busy, setBusy] = useState(false);
+  const controller = useRef<string|null>(null);
   const active = !!status && !["saved", "cancelled", "error"].includes(status.phase);
 
   function applyStatus(value: RecordingStatus | null) {
+    if(controller.current&&value&&value.id!==controller.current&&value.controllerId!==controller.current)return;
     setStatus(value);
     if (value && !["saved", "cancelled", "error"].includes(value.phase)) {
       setMode(value.mode);
@@ -58,7 +60,9 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
     try {
       const path = await save({ title: "录屏视频保存位置", defaultPath: `ScreenShot-录屏-${new Date().toLocaleString("sv-SE").replace(/[ :]/g, "-")}.mp4`, filters: [{ name: "视频", extensions: ["mp4", "webm"] }] });
       if (!path) return;
+      controller.current=null;onRecordingPreparing?.();
       const value = await invoke<RecordingStatus>("start_recording_session", { path, options: { mode, fps, audio, originalResolution, browser } });
+      controller.current=value.controllerId||value.id;
       onRecordingStarted?.(value);
       setStatus(current => current?.id === value.id ? current : value);
       onNotify(`已打开${value.browser}，请选择录制内容`);

@@ -13,6 +13,13 @@
     <section class="card">
       <div class="heading"><div><span class="eyebrow">SCREEN RECORDING</span><h2 id="title">正在连接 ScreenShot…</h2></div><span id="phase" class="badge">准备中</span></div>
       <p id="instructions" class="muted">请保持 ScreenShot 应用运行。</p>
+      <fieldset id="settings" class="settings">
+        <label>录制方式<select id="mode"><option value="tab">浏览器标签页</option><option value="window">应用窗口</option><option value="region">框选区域</option><option value="desktop">电脑屏幕</option></select></label>
+        <label>帧率<select id="fps"><option value="15">15 fps</option><option value="30">30 fps</option><option value="60">60 fps</option></select></label>
+        <label>画质<select id="quality"><option value="1080p">最高 1080p</option><option value="4k">最高 4K</option></select></label>
+        <label class="audio-option"><input id="audio" type="checkbox" />录制共享声音</label>
+        <div id="native-target" class="native-target" hidden><label>录制目标<select id="target" aria-label="录制目标"></select></label><button id="refresh" type="button">刷新来源</button><button id="select-region" type="button" hidden>框选录制区域</button><span id="region-size" class="muted"></span></div>
+      </fieldset>
       <div id="notice" role="status" class="notice" hidden></div>
       <div class="controls">
         <button id="choose" class="primary" disabled>选择录制内容</button>
@@ -35,7 +42,7 @@
         </div>
         <p id="crop-help" class="muted" hidden>在预览画面上拖动框选，拖动四角可调整范围。确认后点击“开始录制选区”。</p>
       </div>
-      <div id="saved" class="saved" hidden><h3>视频已保存</h3><p id="saved-path"></p><p class="muted">可回到 ScreenShot 打开所在文件夹；此页现在可以关闭。</p></div>
+      <div id="saved" class="saved" hidden><h3>视频已保存</h3><p id="saved-path"></p><p class="muted">可用相同方式继续新录制，或在上方切换录制方式。新视频保存在同一目录，使用独立文件名。</p><button id="reveal" type="button">打开所在文件夹</button></div>
     </section>
     <footer><span id="stop-help">可从 ScreenShot 工具按钮或托盘菜单停止录屏</span><br />共享声音取决于浏览器和所选来源；不采集麦克风。请保留此页面，停止后会自动保存。</footer>
   </main>
