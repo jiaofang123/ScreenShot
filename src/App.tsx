@@ -17,6 +17,7 @@ function App() {
   const [longStatus, setLongStatus] = useState<LongCaptureStatus | null>(null);
   const [page, setPage] = useState<"capture" | "record" | "studio">("capture");
   const [studioOpened, setStudioOpened] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [studioRecording, setStudioRecording] = useState<StudioRecording | null>(null);
   const studioController = useRef<string | null>(null), studioProject = useRef<string | undefined>(undefined);
   const preparingRecording = useRef(false), latestRecording = useRef<RecordingStatus | null>(null);
@@ -93,7 +94,7 @@ function App() {
 
   useEffect(() => {
     if (!message) return;
-    const timer = window.setTimeout(() => setMessage(null), 3600);
+    const timer = window.setTimeout(() => setMessage(null), 7000);
     return () => window.clearTimeout(timer);
   }, [message]);
 
@@ -119,7 +120,7 @@ function App() {
           }}
           onNotify={setMessage}
         />
-        {message && <div className="status-toast">{message}</div>}
+        {message && <div className="status-toast" role="status"><span>{message}</span><button aria-label="关闭提示" onClick={() => setMessage(null)}>×</button></div>}
       </>
     );
   }
@@ -132,27 +133,33 @@ function App() {
         </div>
         <div>
           <h1>ScreenShot</h1>
-          <p>{page === "studio" ? "录制演示，添加旁白，合成成片。" : "轻快、私密，截图之后立刻能用。"}</p>
+          <p>{page === "studio" ? "添加视频 → 编辑文字和旁白 → 合成并导出" : page === "record" ? "选择录制内容，录完自动保存。" : "截图、录屏、制作讲解视频，选一个开始。"}</p>
         </div>
         <div className="privacy-pill">{page === "studio" ? "视频本机处理 · 在线语音需联网" : "完全本地处理"}</div>
       </header>
 
       <nav className="mode-tabs" aria-label="工具模式">
-        <button className={page === "capture" ? "selected" : ""} onClick={() => switchPage("capture")}>截图</button>
-        <button className={page === "record" ? "selected" : ""} onClick={() => switchPage("record")}>录屏</button>
-        <button className={page === "studio" ? "selected" : ""} onClick={() => switchPage("studio")}>视频制作</button>
+        <button aria-label="截图" aria-pressed={page === "capture"} className={page === "capture" ? "selected" : ""} onClick={() => switchPage("capture")}>截图<small aria-hidden="true">截取画面、添加标注</small></button>
+        <button aria-label="录屏" aria-pressed={page === "record"} className={page === "record" ? "selected" : ""} onClick={() => switchPage("record")}>录屏<small aria-hidden="true">把屏幕录成视频</small></button>
+        <button aria-label="视频制作" aria-pressed={page === "studio"} className={page === "studio" ? "selected" : ""} onClick={() => switchPage("studio")}>视频制作<small aria-hidden="true">加文字、配音、合并视频</small></button>
         {page === "studio" && <button onClick={() => { void invoke("toggle_studio_fullscreen").catch(error => setMessage(String(error))); }}>全屏 / 退出全屏</button>}
+        <button className="help-toggle" aria-expanded={showHelp} onClick={() => setShowHelp(value => !value)}>{showHelp ? "收起帮助" : "使用帮助"}</button>
       </nav>
+      {showHelp && <section className="usage-guide" aria-label="使用帮助">
+        <div><strong>截图</strong><p>开始截图 → 拖动框选。拖动四角可调整，按 Enter 直接复制；需要标注时点“编辑截图”。</p></div>
+        <div><strong>录屏</strong><p>选择窗口、屏幕或区域 → 开始录屏。窗口会自动收起，用菜单栏图标或停止快捷键结束，视频自动保存。</p></div>
+        <div><strong>视频制作</strong><p>导入或录制视频 → 写稿并生成语音，也可只插入文字 → 合成音视频 → 合并预览 → 合并导出。修改自动保存。</p></div>
+      </section>}
 
       {studioOpened && <StudioWorkspace visible={page === "studio"} recording={studioRecording} onImported={importedRecording} onRecord={requestRecording} onNotify={setMessage} />}
       {page === "record" ? <RecordingPanel onNotify={setMessage} onEditVideo={recordingToStudio} /> : page === "capture" ? <>
 
       <section className="hero-card">
         <div className="hero-copy">
-          <span className="eyebrow">READY WHEN YOU ARE</span>
-          <h2>框住重点，剩下的交给它。</h2>
+          <span className="eyebrow">截图 · 三步完成</span>
+          <h2>拖动框选，马上复制。</h2>
           <p>
-            框选后可直接完成并复制；需要画箭头、圈重点、添加文字或打马赛克时，选择编辑截图。也支持手动滚动长截图。
+            点击下方按钮后，在屏幕上拖出需要的范围。按 Enter 或点“完成并复制”，就能粘贴到聊天、文档里。
           </p>
           <button className="capture-button" onClick={startCapture} disabled={busy}>
             <span className="capture-icon" aria-hidden="true" />
@@ -188,25 +195,25 @@ function App() {
       <section className="feature-grid">
         <article>
           <div className="feature-icon">⌗</div>
-          <h3>精确框选</h3>
-          <p>冻结当前桌面，跨应用选取你真正需要的区域。</p>
+          <h3>1. 框选需要的画面</h3>
+          <p>屏幕冻结后拖动框选，四角可调整。选错了可重新拖动；按 Esc 取消。</p>
         </article>
         <article>
           <div className="feature-icon">⇣</div>
-          <h3>手动滚动长图</h3>
-          <p>慢慢向下滚动，程序识别重叠内容并自动拼接。</p>
+          <h3>2. 需要标注时再编辑</h3>
+          <p>选“编辑截图”，可添加文字、箭头、方框或打码；长页面选“滚动长截图”。</p>
         </article>
         <article>
           <div className="feature-icon">↗</div>
-          <h3>快速标注</h3>
-          <p>箭头、矩形、画笔、文字和马赛克，完成即复制。</p>
+          <h3>3. 复制或保存</h3>
+          <p>“完成并复制”后直接粘贴；想保留图片文件，可在编辑页选择“另存为”。</p>
         </article>
       </section>
 
       </> : null}
       {page !== "studio" && <footer className="home-footer">
-        <span>关闭窗口后仍在托盘运行</span>
-        <span>Windows · macOS</span>
+        <span>关闭窗口后仍在菜单栏 / 托盘运行，可从图标重新打开</span>
+        <span>截图和视频保存在本机</span>
       </footer>}
 
       {longStatus && (
@@ -215,7 +222,7 @@ function App() {
           <span>{longStatus.message}</span>
         </div>
       )}
-      {message && <div className="status-toast">{message}</div>}
+      {message && <div className="status-toast" role="status"><span>{message}</span><button aria-label="关闭提示" onClick={() => setMessage(null)}>×</button></div>}
     </main>
   );
 }

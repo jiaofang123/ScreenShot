@@ -9,7 +9,7 @@ if (window.parent === window) window.addEventListener('DOMContentLoaded', async 
   try {
     const root = window.__STUDIO_QA.projectRoot;
     localStorage.setItem('screenshot-studio-last-project', root);
-    const tab = await wait(() => [...document.querySelectorAll('.mode-tabs button')].find(button => button.textContent === '视频制作'));
+    const tab = await wait(() => document.querySelector('.mode-tabs button[aria-label="视频制作"]'));
     tab.click();
     const frame = await wait(() => document.querySelector('iframe[title="视频制作"]')?.contentWindow);
     await wait(() => frame.document.querySelector('[data-delete-segment-id="native-segment"]'));

@@ -42,6 +42,9 @@ const els = {
   versionCount: $("versionCount"),
   newProjectBtn: $("newProjectBtn"),
   saveProjectBtn: $("saveProjectBtn"),
+  saveAsProjectBtn: $("saveAsProjectBtn"), revealProjectBtn: $("revealProjectBtn"), projectSaveStatus: $("projectSaveStatus"),
+  workflowTitle: $("workflowTitle"), workflowHint: $("workflowHint"), workflowNext: $("workflowNext"),
+  backToOriginalBtn: $("backToOriginalBtn"), outputFeedback: $("outputFeedback"), outputMessage: $("outputMessage"), revealOutputBtn: $("revealOutputBtn"),
   openProjectBtn: $("openProjectBtn"),
   recordBtn: $("recordBtn"),
   importBtn: $("importBtn"),
@@ -390,6 +393,7 @@ const state = {
   textOverlayRect: null,
   saveTimer: null,
   saveChain: Promise.resolve(),
+  saveRevision: 0, guideRunning: false, guideAction: 'import', lastOutput: null,
   previewAudio: null,
   previewAudioVoiceId: null
 };
@@ -502,9 +506,12 @@ function formatDate(value) {
   return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
-function toMediaUrl(file) {
+function toMediaUrl(file, revision) {
   if (!file) return "";
-  if (bridge.mediaUrl) return bridge.mediaUrl(file);
+  if (bridge.mediaUrl) {
+    const url = bridge.mediaUrl(file);
+    return revision && !/^(blob:|data:|demo:)/.test(url) ? `${url}${url.includes('?') ? '&' : '?'}revision=${encodeURIComponent(revision)}` : url;
+  }
   if (/^(blob:|data:|https?:|demo:)/.test(file)) return file;
   const normalized = String(file).replaceAll("\\", "/");
   if (normalized.startsWith("/")) return `file://${normalized}`;
@@ -827,23 +834,31 @@ function queueItemFromRender(render) {
 }
 
 function showToast(message, tone = "default") {
-  els.toast.textContent = message;
+  $('toastMessage').textContent = message;
+  els.toast.setAttribute('role', tone === 'error' ? 'alert' : 'status');
   els.toast.style.background = tone === "error" ? "#991b1b" : "#111827";
   els.toast.classList.add("show");
   clearTimeout(showToast.timer);
-  showToast.timer = setTimeout(() => els.toast.classList.remove("show"), 3200);
+  if (tone !== 'error') showToast.timer = setTimeout(() => els.toast.classList.remove("show"), 6000);
 }
 
 function setBusy(button, busy, label) {
   if (!button) return;
   if (busy) {
-    button.dataset.label = button.textContent;
+    if (button.dataset.busy !== 'true') button.dataset.label = button.textContent;
+    button.dataset.busy = 'true'; button.setAttribute('aria-busy', 'true');
     button.textContent = label || "处理中";
     button.disabled = true;
   } else {
+    delete button.dataset.busy; button.removeAttribute('aria-busy');
     button.textContent = button.dataset.label || button.textContent;
     button.disabled = false;
+    if (button === els.generateVoiceBtn || button === els.synthesizeBtn) renderInspector(false);
+    if ((button === els.mergeBtn || button === els.mergePreviewBtn) && !state.project?.mergeQueue?.length) button.disabled = true;
   }
+  const projectBusy = !!document.querySelector('[data-busy="true"]');
+  for (const control of [els.newProjectBtn, els.openProjectBtn, els.saveAsProjectBtn]) control.disabled = projectBusy;
+  renderWorkflowGuide();
 }
 
 function setPreviewVoiceButtonState() {
@@ -871,6 +886,7 @@ function stopVoicePreview() {
 async function saveProjectSoon() {
   if (!state.project || state.deletingSegmentId) return;
   clearTimeout(state.saveTimer);
+  state.saveRevision++; setSaveStatus('有更改，正在自动保存…');
   state.saveTimer = setTimeout(async () => {
     try {
       await persistProject();
@@ -885,15 +901,88 @@ async function saveProjectNow() {
   if (!state.project) return;
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
+  state.saveRevision++;
   await persistProject();
   renderHeader();
 }
 
 function persistProject() {
   const snapshot = structuredClone(state.project);
+  const revision = state.saveRevision;
+  setSaveStatus('正在保存…');
   const job = state.saveChain.catch(() => {}).then(() => bridge.saveProject(snapshot));
   state.saveChain = job;
-  return job.then(saved => { if (state.project?.id === snapshot.id) state.project.updatedAt = saved.updatedAt; });
+  return job.then(saved => {
+    if (state.project?.id === snapshot.id) {
+      state.project.updatedAt = saved.updatedAt;
+      if (revision === state.saveRevision) setSaveStatus('已自动保存');
+    }
+  }).catch(error => { if (state.project?.id === snapshot.id) setSaveStatus('保存失败，点击“保存项目”重试', true); throw error; });
+}
+
+function setSaveStatus(message, failed = false) {
+  els.projectSaveStatus.textContent = message;
+  els.projectSaveStatus.classList.toggle('failed', failed);
+}
+
+function renderWorkflowGuide() {
+  const asset = selectedAsset(), segment = selectedSegment();
+  const queue = state.project?.mergeQueue || [];
+  const hasVoice = asset?.segments?.some(item => item.voiceVersions?.length);
+  const hasText = [...(asset?.textOverlays || []), ...currentTextOverlays()].some(item => String(item.text || '').trim());
+  const hasRender = !!asset?.renderVersions?.length;
+  let step = 0, title = '先添加一个视频', hint = '导入已有视频，或点左侧“录屏”。项目会自动创建，无需提前设置。', action = 'import', label = '导入视频';
+  if (asset) {
+    const dirtyVoice = asset.segments?.find(item => item.needsVoiceUpdate && String(item.text || '').trim());
+    if (dirtyVoice) {
+      step=1; title='旁白文字已修改，先更新语音'; hint='重新生成会覆盖对应的旧语音。生成后再次合成，修改才会进入最终视频。'; action='voice';label='重新生成语音';
+    } else if (hasRender && asset.pendingRenderEdits) {
+      step=2; title='有新修改，重新合成后再导出'; hint='原视频的文字、时间或配音已修改。再次合成会覆盖原结果，合并列表编号保持不变。';action='synthesize-original';label='更新合成视频';
+    } else if (!hasVoice && !hasText && !hasRender) {
+      step = 1; title = '给视频添加讲解'; hint = '在右侧写旁白，再生成语音；也可点击画面上方“插入文字”，不需要配音。';
+      action = String(segment?.text || '').trim() ? 'voice' : 'write'; label = action === 'voice' ? '生成语音' : '填写旁白文字';
+    } else if (!hasRender) {
+      step = 2; title = '把视频、文字和旁白合成一段'; hint = '可先试听配音。点击合成后，结果会加入下方列表；重新生成会覆盖旧结果。'; action = 'synthesize'; label = '合成音视频';
+    } else if (!queue.length) {
+      step = 3; title = '选择要导出的片段'; hint = '勾选下方合成视频；拖动调整播放顺序，编号不会改变。'; action = 'select'; label = '加入导出列表';
+    } else {
+      step = 3; const previewed = state.lastOutput?.kind === 'preview' && !state.lastOutput.stale && state.lastOutput.projectId === state.project?.id;
+      title = previewed ? '预览满意后，导出最终视频' : '合并前先看一下效果';
+      hint = `已选择 ${queue.length} 段视频。${previewed ? '点击导出后，可直接打开视频文件所在位置。' : '预览和导出都会应用合成视频中新插入的文字；修改原视频或旁白后，请先再次合成。'}`;
+      action = previewed ? 'export' : 'preview'; label = previewed ? '合并导出' : '合并预览';
+    }
+  }
+  const busy = state.guideRunning || !!document.querySelector('[data-busy="true"]');
+  state.guideAction = action;
+  els.workflowTitle.textContent = busy ? '正在处理，请稍候…' : title;
+  els.workflowHint.textContent = busy ? '处理完成后会自动显示结果，请保留窗口。' : hint;
+  els.workflowNext.textContent = busy ? '处理中…' : label; els.workflowNext.disabled = busy;
+  document.querySelectorAll('[data-workflow-step]').forEach(button => {
+    const current = Number(button.dataset.workflowStep) === step;
+    button.classList.toggle('current', current);
+    if (current) button.setAttribute('aria-current', 'step'); else button.removeAttribute('aria-current');
+  });
+}
+
+async function followWorkflowGuide() {
+  if (state.guideRunning) return;
+  const action = state.guideAction;
+  state.guideRunning = true; renderWorkflowGuide();
+  try {
+    if (action === 'import') await handleImport();
+    if (action === 'write') { if (!selectedSegment()) addSegment(); els.scriptText.focus(); }
+    if (action === 'voice') {
+      const dirty = selectedAsset()?.segments?.find(item => item.needsVoiceUpdate && String(item.text || '').trim());
+      if (dirty) { state.selectedSegmentId=dirty.id;state.selectedVoiceId=dirty.activeVoiceId || dirty.voiceVersions?.at(-1)?.id || null;renderInspector(); }
+      await handleGenerateVoice();
+    }
+    if (action === 'synthesize') await handleSynthesize();
+    if (action === 'synthesize-original') { state.previewPath=null;renderPreview();await handleSynthesize(); }
+    if (action === 'select') { const render = allRenderItems().find(item => item.assetId === state.selectedAssetId); if (render) toggleMergeQueue(render, true); }
+    if (action === 'preview') await handleMergePreview();
+    if (action === 'export') await handleMerge();
+  } catch (error) { reportError(error); }
+  finally { state.guideRunning = false; renderWorkflowGuide(); }
 }
 
 async function ensureProject() {
@@ -907,10 +996,13 @@ async function ensureProject() {
 
 function renderHeader() {
   if (!state.project) {
-    els.projectSubtitle.textContent = "未打开项目";
+    els.projectSubtitle.textContent = "导入或录屏后自动创建项目";
+    els.revealProjectBtn.disabled = true;
     return;
   }
-  els.projectSubtitle.textContent = `${state.project.name} · ${state.project.rootDir}`;
+  els.projectSubtitle.textContent = state.project.name;
+  els.projectSubtitle.title = state.project.rootDir;
+  els.revealProjectBtn.disabled = false;
 }
 
 function renderStatus() {
@@ -927,7 +1019,7 @@ function renderAssets() {
   const assets = state.project?.assets || [];
   els.assetCount.textContent = String(assets.length);
   if (!assets.length) {
-    els.assetList.innerHTML = `<div class="item-meta">暂无素材</div>`;
+    els.assetList.innerHTML = `<div class="empty-list"><strong>还没有视频</strong><p>点上方“导入视频”选择文件，或直接“录屏”。</p></div>`;
     return;
   }
   els.assetList.innerHTML = assets.map((asset) => `
@@ -946,7 +1038,7 @@ function renderAssets() {
   els.assetList.querySelectorAll("[data-delete-asset-id]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      deleteAsset(button.dataset.deleteAssetId);
+      void deleteAsset(button.dataset.deleteAssetId).catch(reportError);
     });
   });
   els.assetList.querySelectorAll("[data-asset-title-id]").forEach((input) => {
@@ -1010,7 +1102,7 @@ function renderInsertedTextList() {
     .sort((a, b) => a.start - b.start || String(a.createdAt || "").localeCompare(String(b.createdAt || "")));
   els.insertedTextCount.textContent = String(overlays.length);
   if (!overlays.length) {
-    els.insertedTextList.innerHTML = `<div class="item-meta">暂无插入文字</div>`;
+    els.insertedTextList.innerHTML = `<div class="item-meta">${currentTextTarget() ? '点画面上方“插入文字”，再在这里修改内容和显示时间。' : '选择一个原视频或合成视频后，可添加和编辑画面文字。'}</div>`;
     return;
   }
 
@@ -1057,11 +1149,24 @@ function voiceDurationText(version) {
   return formatDuration(version?.duration ?? version?.voiceDuration ?? version?.segmentDuration);
 }
 
-function deleteAsset(assetId) {
+async function confirmProjectRemoval(heading, message) {
+  if (els.deleteSegmentDialog.open) return false;
+  $('deleteSegmentHeading').textContent = heading;
+  els.deleteSegmentDialog.querySelector('[value="delete"]').textContent = heading.startsWith('移除') ? '确认移除' : '确认删除';
+  els.deleteSegmentMessage.textContent = message;
+  els.deleteSegmentDialog.returnValue = 'cancel';
+  const result = new Promise(resolve => els.deleteSegmentDialog.addEventListener('close', () => resolve(els.deleteSegmentDialog.returnValue === 'delete'), {once:true}));
+  els.deleteSegmentDialog.showModal();
+  return result;
+}
+
+async function deleteAsset(assetId) {
   if (!state.project || !assetId) return;
+  const project = state.project;
   const asset = findAssetById(assetId);
   if (!asset) return;
-  if (!confirm(`删除视频素材“${asset.name}”？该操作只会从当前项目移除，不会删除磁盘文件。`)) return;
+  if (!await confirmProjectRemoval('移除视频素材', `从项目移除“${asset.name}”及其合成列表记录？原视频文件仍保留在磁盘中。`) || state.project !== project) return;
+  invalidateMergePreview();
   stopVoicePreview();
 
   const renderIds = new Set((asset.renderVersions || []).map((render) => render.id));
@@ -1088,35 +1193,32 @@ function deleteAsset(assetId) {
   showToast("视频素材已删除");
 }
 
-function deleteVoice(voiceId, segmentId = state.selectedSegmentId) {
-  const segment = findSegmentById(state.selectedAssetId, segmentId);
+async function deleteVoice(voiceId, segmentId = state.selectedSegmentId) {
+  const project = state.project, asset = selectedAsset();
+  const segment = findSegmentById(asset?.id, segmentId);
   if (!segment || !voiceId) return;
   const voice = segment.voiceVersions?.find((item) => item.id === voiceId);
   if (!voice) return;
   const title = voice.title || "旁白语音";
-  if (!confirm(`删除转写语音“${title}”？该操作只会从当前项目移除，不会删除磁盘文件。`)) return;
+  if (!await confirmProjectRemoval('移除旁白语音', `从语音列表移除“${title}”？文字稿会保留，可重新生成语音。`) || state.project !== project || !asset?.segments.includes(segment)) return;
   if (state.previewAudioVoiceId === voiceId) stopVoicePreview();
 
   segment.voiceVersions = (segment.voiceVersions || []).filter((item) => item.id !== voiceId);
+  markAssetEdited(asset);
   const nextVoice = segment.voiceVersions.at(-1) || null;
   segment.activeVoiceId = nextVoice?.id || null;
   if (state.selectedVoiceId === voiceId) state.selectedVoiceId = nextVoice?.id || null;
 
   saveProjectSoon();
   renderAll();
-  showToast("转写语音已删除");
+  showToast("旁白语音已移除，文字稿已保留");
 }
 
 async function deleteSegment(segmentId) {
   const project = state.project, asset = selectedAsset();
   const segment = asset?.segments?.find(item => item.id === segmentId);
   if (!project || !segment || state.deletingSegmentId || els.deleteSegmentDialog.open || state.voiceJobs.has(segmentId)) return;
-  // WKWebView does not present window.confirm in the embedded editor.
-  els.deleteSegmentMessage.textContent = `删除文字稿“${segmentTitle(segment, segmentIndex(asset, segmentId))}”及其对应的语音文件？`;
-  els.deleteSegmentDialog.returnValue = 'cancel';
-  const confirmed = new Promise(resolve => els.deleteSegmentDialog.addEventListener('close', () => resolve(els.deleteSegmentDialog.returnValue === 'delete'), { once: true }));
-  els.deleteSegmentDialog.showModal();
-  if (!await confirmed || state.project !== project || !asset.segments.includes(segment)) return;
+  if (!await confirmProjectRemoval('删除文字稿和对应语音', `删除文字稿“${segmentTitle(segment, segmentIndex(asset, segmentId))}”？对应生成的语音也会一起删除，其他文字稿不受影响。`) || state.project !== project || !asset.segments.includes(segment)) return;
   updateSegmentFromForm();
   if ((segment.voiceVersions || []).some(voice => voice.id === state.previewAudioVoiceId)) stopVoicePreview();
   state.deletingSegmentId = segmentId; renderSegmentList();
@@ -1127,6 +1229,7 @@ async function deleteSegment(segmentId) {
     const result = await bridge.deleteSegment({ project: structuredClone(project), assetId: asset.id, segmentId });
     if (state.project?.id === project.id) {
       asset.segments = asset.segments.filter(item => item.id !== segmentId);
+      markAssetEdited(asset);
       asset.segmentsInitialized = true;
       if (state.selectedAssetId === asset.id && state.selectedSegmentId === segmentId) {
         const next = asset.segments[Math.min(index, asset.segments.length - 1)];
@@ -1141,8 +1244,9 @@ async function deleteSegment(segmentId) {
   finally { state.deletingSegmentId = null; renderSegmentList(); if (state.project?.id === project.id) saveProjectSoon(); }
 }
 
-function deleteRenderVersion(renderId) {
+async function deleteRenderVersion(renderId) {
   if (!state.project || !renderId) return;
+  const project = state.project;
   let ownerAsset = null;
   let render = null;
   for (const asset of state.project.assets || []) {
@@ -1153,7 +1257,8 @@ function deleteRenderVersion(renderId) {
     }
   }
   if (!ownerAsset || !render) return;
-  if (!confirm(`删除合成视频“${render.label || "合成视频"}”？该操作只会从当前项目移除，不会删除磁盘文件。`)) return;
+  if (!await confirmProjectRemoval('移除合成视频', `从项目和合并列表移除“${render.label || '合成视频'}”？原视频及已导出的文件会保留。`) || state.project !== project) return;
+  invalidateMergePreview();
 
   ownerAsset.renderVersions = (ownerAsset.renderVersions || []).filter((item) => item.id !== renderId);
   state.project.mergeQueue = (state.project.mergeQueue || []).filter((item) => item.id !== renderId);
@@ -1262,6 +1367,7 @@ function renderTextOverlays() {
 
 function updateTextOverlay(overlay, changes) {
   if (!overlay) return;
+  invalidateMergePreview();
   const rect = state.textOverlayRect || videoContentRect();
   Object.assign(overlay, changes, {
     previewWidth: Number(rect?.width || 0) || overlay.previewWidth || null,
@@ -1269,8 +1375,11 @@ function updateTextOverlay(overlay, changes) {
     updatedAt: new Date().toISOString()
   });
   normalizeTextOverlay(overlay);
+  const target = currentTextTarget();
+  if (target?.type === 'asset') markAssetEdited(target.asset);
   saveProjectSoon();
   renderInsertedTextList();
+  renderWorkflowGuide();
 }
 
 function placeCaretAtEnd(element) {
@@ -1511,10 +1620,23 @@ function deleteSelectedTextOverlay() {
   const target = currentTextTarget();
   if (!target || !state.selectedTextOverlayId) return;
   target.owner.textOverlays = (target.owner.textOverlays || []).filter((item) => item.id !== state.selectedTextOverlayId);
+  if (target.type === 'asset') markAssetEdited(target.asset);
   state.selectedTextOverlayId = null;
   saveProjectSoon();
   renderTextOverlays();
   renderInsertedTextList();
+  renderInspector(false); renderWorkflowGuide();
+}
+
+function markAssetEdited(asset) {
+  if (!asset) return;
+  asset.pendingRenderEdits = true;
+  asset.editRevision = (Number(asset.editRevision) || 0) + 1;
+  invalidateMergePreview();
+}
+
+function invalidateMergePreview() {
+  if (state.lastOutput?.kind === 'preview') state.lastOutput.stale=true;
 }
 
 function updateSelectedTextStyle() {
@@ -1569,16 +1691,23 @@ function renderPreview() {
   const path = state.previewPath || asset?.path || "";
   els.emptyPreview.style.display = path ? "none" : "grid";
   els.videoPreview.style.display = path ? "block" : "none";
-  if (path && els.videoPreview.dataset.path !== path) {
+  const mediaRevision = (asset?.renderVersions || []).find(render => render.path === path)?.updatedAt || '';
+  if (path && (els.videoPreview.dataset.path !== path || els.videoPreview.dataset.revision !== mediaRevision)) {
     els.videoPreview.dataset.path = path;
-    els.videoPreview.src = toMediaUrl(path);
+    els.videoPreview.dataset.revision = mediaRevision;
+    els.videoPreview.src = toMediaUrl(path, mediaRevision);
   }
-  els.previewTitle.textContent = asset ? asset.name : "预览";
+  const output = state.lastOutput?.path === path && state.lastOutput?.projectId === state.project?.id ? state.lastOutput : null;
+  els.previewTitle.textContent = output?.kind === 'preview' ? '合并预览' : output?.kind === 'export' ? '最终视频' : asset ? asset.name : '预览';
+  els.backToOriginalBtn.hidden = !asset || !state.previewPath;
+  els.outputFeedback.hidden = !output;
+  if (output) els.outputMessage.textContent = output.stale ? '预览后又有修改，请重新合并预览。' : output.kind === 'preview' ? '预览已生成。满意后点击“合并导出”保存最终视频。' : output.kind === 'export' ? '最终视频已导出。' : '合成完成，已加入下方合并列表。';
   const segment = selectedSegment();
   const meta = segment
     ? `${formatTime(segment.start)} - ${formatTime(segment.end)} · ${segment.voiceVersions?.length || 0} 个语音版本`
     : asset ? `${formatTime(asset.duration)} · 未选择文字稿段` : "请选择素材";
-  els.previewMeta.textContent = meta;
+  els.previewMeta.textContent = `${state.previewPath ? previewRender(asset) ? '当前：合成视频' : '当前：合并结果' : '当前：原视频'} · ${meta}`;
+  renderInsertedTextList();
   requestAnimationFrame(renderTextOverlays);
 }
 
@@ -1595,15 +1724,21 @@ function renderInspector(refreshSegments = true) {
   els.segmentEnd.disabled = !hasSegment;
   els.scriptText.disabled = !hasSegment;
   els.speedSelect.disabled = !hasSegment;
-  els.generateVoiceBtn.disabled = !hasSegment || state.voiceJobs.has(segment?.id) || state.deletingSegmentId === segment?.id;
+  els.generateVoiceBtn.disabled = !hasSegment || !String(segment?.text || '').trim() || state.voiceJobs.has(segment?.id) || state.deletingSegmentId === segment?.id;
+  els.generateVoiceBtn.title = !String(segment?.text || '').trim() ? '先在上方输入要朗读的文字' : currentVoice ? '会覆盖这段已有的语音；修改文字后点这里更新' : '把上方文字读成语音';
   els.previewVoiceBtn.disabled = !hasSegment || !currentVoice;
   setPreviewVoiceButtonState();
-  els.synthesizeBtn.disabled = !asset || (textTarget?.type === "render" ? !hasAnyTextOverlay : (!hasAnyVoice && !hasAnyTextOverlay));
+  const resetComposition = !!asset?.pendingRenderEdits && !!asset?.renderVersions?.length;
+  els.synthesizeBtn.disabled = els.synthesizeBtn.dataset.busy === 'true' || !asset || (textTarget?.type === "render" ? !hasAnyTextOverlay : (!hasAnyVoice && !hasAnyTextOverlay && !resetComposition));
+  els.addSegmentBtn.disabled = !asset;
+  if (els.generateVoiceBtn.dataset.busy !== 'true') els.generateVoiceBtn.textContent = currentVoice ? '重新生成语音' : '生成语音';
+  els.synthesizeBtn.title = !asset ? '先导入或录制一个视频' : textTarget?.type === 'render' && !hasAnyTextOverlay ? '当前为合成结果；点“编辑原视频”可修改原稿并重新合成' : !hasAnyVoice && !hasAnyTextOverlay && !resetComposition ? '先生成旁白语音，或插入画面文字' : '应用文字和旁白；再次合成会覆盖原结果';
 
-  els.segmentStart.value = hasSegment ? Number(segment.start || 0).toFixed(1) : "0";
-  els.segmentEnd.value = hasSegment ? Number(segment.end || 10).toFixed(1) : "10";
-  els.scriptText.value = hasSegment ? segment.text || "" : "";
-  els.speedSelect.value = hasSegment ? segment.speed || "normal" : "normal";
+  for (const [field,value] of [[els.segmentStart,hasSegment?Number(segment.start || 0).toFixed(1):'0'],[els.segmentEnd,hasSegment?Number(segment.end || 10).toFixed(1):'10'],[els.scriptText,hasSegment?segment.text || '':''],[els.speedSelect,hasSegment?segment.speed || 'normal':'normal']]) {
+    const owner = segment?.id || '';
+    if (field.dataset.segmentOwner !== owner || document.activeElement !== field) field.value=value;
+    field.dataset.segmentOwner=owner;
+  }
   if (refreshSegments) renderSegmentList();
 
   const voiceItems = (asset?.segments || []).flatMap((item, segmentIndex) =>
@@ -1678,7 +1813,7 @@ function renderInspector(refreshSegments = true) {
   els.voiceVersions.querySelectorAll("[data-delete-voice-id]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      deleteVoice(button.dataset.deleteVoiceId, button.dataset.deleteVoiceSegmentId);
+      void deleteVoice(button.dataset.deleteVoiceId, button.dataset.deleteVoiceSegmentId).catch(reportError);
     });
   });
 }
@@ -1778,8 +1913,12 @@ function renderMergeQueue() {
   ensureRenderNumbers();
   const items = allRenderItems();
   els.queueCount.textContent = String(items.length);
+  const selectedCount = state.project?.mergeQueue?.length || 0;
+  if (els.mergeBtn.dataset.busy !== 'true') els.mergeBtn.disabled = !selectedCount;
+  if (els.mergePreviewBtn.dataset.busy !== 'true') els.mergePreviewBtn.disabled = !selectedCount;
+  $('mergeHelp').textContent = selectedCount ? `已选 ${selectedCount} 段 · 拖动卡片调整播放顺序，编号固定。未勾选的片段不会导出。` : '先合成音视频，再勾选要导出的片段。拖动卡片或用手柄方向键排序，编号固定。';
   if (!items.length) {
-    els.mergeQueue.innerHTML = `<div class="item-meta">暂无合成视频</div>`;
+    els.mergeQueue.innerHTML = `<div class="empty-list"><strong>这里显示合成结果</strong><p>添加文字或生成语音后，点右侧“合成音视频”。勾选片段后即可预览和导出。</p></div>`;
     return;
   }
   els.mergeQueue.innerHTML = items.map((item) => {
@@ -1803,7 +1942,7 @@ function renderMergeQueue() {
   els.mergeQueue.querySelectorAll("[data-delete-render-id]").forEach((button) => {
     button.addEventListener("click", (event) => {
       event.stopPropagation();
-      deleteRenderVersion(button.dataset.deleteRenderId);
+      void deleteRenderVersion(button.dataset.deleteRenderId).catch(reportError);
     });
   });
   els.mergeQueue.querySelectorAll("[data-merge-render-id]").forEach((checkbox) => {
@@ -1844,6 +1983,7 @@ function renderAll() {
   renderInsertedTextList();
   renderInspector();
   renderMergeQueue();
+  renderWorkflowGuide();
 }
 
 function updateSegmentFromForm(refreshList = true) {
@@ -1851,12 +1991,19 @@ function updateSegmentFromForm(refreshList = true) {
   if (!segment) return;
   const start = Math.max(0, Number(els.segmentStart.value || 0));
   const end = Math.max(start + 0.1, Number(els.segmentEnd.value || start + 0.1));
+  if (String(segment.text || '') !== els.scriptText.value || (segment.speed || 'normal') !== els.speedSelect.value) {
+    if (segment.voiceVersions?.length) segment.needsVoiceUpdate = true;
+    markAssetEdited(selectedAsset());
+  }
+  if (segment.start !== start || segment.end !== end) markAssetEdited(selectedAsset());
   segment.start = start;
   segment.end = end;
   segment.text = els.scriptText.value;
   segment.speed = els.speedSelect.value;
+  if (els.generateVoiceBtn.dataset.busy !== 'true') els.generateVoiceBtn.disabled = !String(segment.text || '').trim() || state.voiceJobs.has(segment.id);
   saveProjectSoon();
   if (refreshList) renderSegmentList();
+  renderWorkflowGuide();
 }
 
 function addSegment() {
@@ -1879,6 +2026,7 @@ function addSegment() {
 
 function toggleMergeQueue(render, checked) {
   if (!render || !state.project) return;
+  invalidateMergePreview();
   state.project.mergeQueue ||= [];
   if (checked) {
     const queueItem = queueItemFromRender(render);
@@ -1895,15 +2043,18 @@ function toggleMergeQueue(render, checked) {
   saveProjectSoon();
   renderMergeQueue();
   renderInspector();
+  renderWorkflowGuide();
 }
 
 function reorderQueue(ids) {
   if (!state.project) return;
+  invalidateMergePreview();
   state.project.renderOrder = ids;
   const queued = new Map((state.project.mergeQueue || []).map(item => [item.id, item]));
   state.project.mergeQueue = ids.filter(id => queued.has(id)).map(id => queued.get(id));
   saveProjectSoon();
   renderMergeQueue();
+  renderWorkflowGuide();
 }
 
 function resetSelectionForProject(project) {
@@ -1944,8 +2095,9 @@ async function handleSaveProjectFolder() {
   updateSegmentFromForm();
   clearTimeout(state.saveTimer);
   state.saveTimer = null;
-  setBusy(els.saveProjectBtn, true, "保存中");
+  setBusy(els.saveAsProjectBtn, true, "另存中");
   try {
+    await saveProjectNow();
     const saved = await bridge.saveProjectFolder(project);
     if (!saved) return;
     state.project = saved;
@@ -1959,37 +2111,38 @@ async function handleSaveProjectFolder() {
   } catch (error) {
     showToast(error.message || "保存项目失败", "error");
   } finally {
-    setBusy(els.saveProjectBtn, false);
+    setBusy(els.saveAsProjectBtn, false);
   }
 }
 
 async function handleOpenProject() {
-  const project = await bridge.openProject();
-  if (!project) return;
-  stopVoicePreview();
-  state.project = project;
-  state.selectedAssetId = project.assets?.[0]?.id || null;
-  ensureDefaultSegment(selectedAsset(), true);
-  const segment = selectedSegment();
-  state.selectedVoiceId = segment?.activeVoiceId || segment?.voiceVersions?.at(-1)?.id || null;
-  state.selectedRenderId = selectedAsset()?.renderVersions?.at(-1)?.id || null;
-  state.previewPath = null;
-  state.selectedTextOverlayId = null;
-  renderAll();
+  if (els.openProjectBtn.dataset.busy === 'true') return;
+  setBusy(els.openProjectBtn, true, '打开中…');
+  try {
+    updateSegmentFromForm(); await saveProjectNow();
+    const project = await bridge.openProject();
+    if (!project) return;
+    stopVoicePreview(); state.project = project; state.lastOutput = null;
+    resetSelectionForProject(project); renderAll(); setSaveStatus('已自动保存');
+  } finally { setBusy(els.openProjectBtn, false); }
 }
 
 async function handleImport() {
-  const project = await ensureProject();
-  const assets = await bridge.importVideos({ projectRoot: project.rootDir });
-  if (!assets.length) return;
-  stopVoicePreview();
-  project.assets.push(...assets);
-  state.selectedAssetId = assets[0].id;
-  ensureDefaultSegment(assets[0], true);
-  state.previewPath = null;
-  await saveProjectNow();
-  renderAll();
-  showToast(`已导入 ${assets.length} 个视频`);
+  if (els.importBtn.dataset.busy === 'true') return;
+  setBusy(els.importBtn, true, '导入中…');
+  try {
+    const project = await ensureProject();
+    const assets = await bridge.importVideos({ projectRoot: project.rootDir });
+    if (!assets.length) return;
+    stopVoicePreview();
+    project.assets.push(...assets);
+    state.selectedAssetId = assets[0].id;
+    ensureDefaultSegment(assets[0], true);
+    state.previewPath = null;
+    await saveProjectNow();
+    renderAll();
+    showToast(`已添加 ${assets.length} 个视频，接下来可填写旁白或插入文字`);
+  } finally { setBusy(els.importBtn, false); }
 }
 
 async function handleGenerateVoice() {
@@ -2026,6 +2179,8 @@ async function handleGenerateVoice() {
       voice.titleSource = "segment";
     }
     targetSegment.voiceVersions = [voice];
+    targetSegment.needsVoiceUpdate = targetSegment.text !== text || targetSegment.speed !== speed;
+    markAssetEdited(findAssetById(assetId));
     targetSegment.activeVoiceId = voice.id;
     state.selectedVoiceId = voice.id;
     await saveProjectNow();
@@ -2051,7 +2206,7 @@ async function handlePreviewVoice() {
   }
   try {
     const prepared = await bridge.prepareAudioPreview({ path: voice.path });
-    const audio = new Audio(toMediaUrl(prepared.path || voice.path));
+    const audio = new Audio(toMediaUrl(prepared.path || voice.path, voice.updatedAt || voice.createdAt));
     state.previewAudio = audio;
     state.previewAudioVoiceId = voice.id;
     setPreviewVoiceButtonState();
@@ -2109,6 +2264,7 @@ function mergeItemsWithPendingText(queue) {
 }
 
 async function handleSynthesize() {
+  if (els.synthesizeBtn.dataset.busy === 'true') return;
   const project = await ensureProject();
   const asset = selectedAsset();
   const segment = selectedSegment();
@@ -2117,6 +2273,8 @@ async function handleSynthesize() {
   const assetId = asset.id;
   const textTarget = currentTextTarget();
   const editingRender = textTarget?.type === "render" ? textTarget.owner : null;
+  const editRevision = Number(asset.editRevision) || 0;
+  const resetComposition = !editingRender && !!asset.pendingRenderEdits && !!asset.renderVersions?.length;
   const textOverlays = serializableTextOverlays(textTarget?.owner);
   const overlays = editingRender ? [] : (asset.segments || [])
     .map((item) => {
@@ -2131,7 +2289,7 @@ async function handleSynthesize() {
       };
     })
     .filter(Boolean);
-  if (!overlays.length && !textOverlays.length) {
+  if (!overlays.length && !textOverlays.length && !resetComposition) {
     showToast("请先生成至少一段语音或插入文字", "error");
     return;
   }
@@ -2155,10 +2313,12 @@ async function handleSynthesize() {
       keepOriginalAudio: Boolean(editingRender || (!overlays.length && textOverlays.length)),
       existingRenderId: existingRender?.id || null,
       existingRenderPath: existingRender?.path || null,
-      existingCreatedAt: existingRender?.createdAt || null
+      existingCreatedAt: existingRender?.createdAt || null,
+      resetComposition
     });
     const targetAsset = findAssetById(assetId);
     if (!targetAsset) throw new Error("视频素材已不存在。");
+    if (!editingRender && (Number(targetAsset.editRevision) || 0) === editRevision) targetAsset.pendingRenderEdits = false;
     if (editingRender) {
       render.textOverlayCount = Number(render.textOverlayCount || 0) +
         Number(editingRender.textOverlayCount || editingRender.textOverlaysApplied || 0);
@@ -2183,6 +2343,7 @@ async function handleSynthesize() {
     }, true);
     state.selectedRenderId = render.id;
     state.previewPath = render.path;
+    state.lastOutput = {...render, kind:'render', projectId:project.id};
     state.selectedTextOverlayId = null;
     await saveProjectNow();
     renderAll();
@@ -2212,7 +2373,9 @@ async function handleMerge() {
     project.exports.push(exported);
     await saveProjectNow();
     state.previewPath = exported.path;
+    state.lastOutput = {...exported, kind:'export', projectId:project.id};
     renderPreview();
+    renderWorkflowGuide();
     showToast("最终视频已导出");
   } catch (error) {
     showToast(error.message || "合并导出失败", "error");
@@ -2237,7 +2400,9 @@ async function handleMergePreview() {
       preview: true
     });
     state.previewPath = preview.path;
+    state.lastOutput = {...preview, kind:'preview', projectId:project.id};
     renderPreview();
+    renderWorkflowGuide();
     showToast("合并预览已生成");
   } catch (error) {
     showToast(error.message || "合并预览失败", "error");
@@ -2675,7 +2840,25 @@ function attachEvents() {
     input.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); input.blur(); } });
   }
   els.newProjectBtn.addEventListener("click", () => handleNewProject().catch(reportError));
-  els.saveProjectBtn.addEventListener("click", () => handleSaveProjectFolder().catch(reportError));
+  els.saveProjectBtn.addEventListener('click', () => { void saveProjectNow().then(() => showToast(state.project ? '项目已保存' : '添加视频后会自动创建项目')).catch(reportError); });
+  els.saveAsProjectBtn.addEventListener('click', () => handleSaveProjectFolder().catch(reportError));
+  els.revealProjectBtn.addEventListener('click', () => { if (state.project?.rootDir) void bridge.showItem(state.project.rootDir).catch(reportError); });
+  els.workflowNext.addEventListener('click', followWorkflowGuide);
+  els.backToOriginalBtn.addEventListener('click', () => { state.previewPath=null;state.selectedTextOverlayId=null;renderAll(); });
+  els.revealOutputBtn.addEventListener('click', () => { if (state.lastOutput?.path) void bridge.showItem(state.lastOutput.path).catch(reportError); });
+  $('closeToast').addEventListener('click', () => els.toast.classList.remove('show'));
+  document.querySelectorAll('[data-workflow-step]').forEach(button => button.addEventListener('click', () => {
+    const step = Number(button.dataset.workflowStep);
+    if (step === 1 && selectedAsset() && state.previewPath) { state.previewPath=null; state.selectedTextOverlayId=null; renderAll(); }
+    const target = [els.importBtn, els.scriptText.disabled ? els.addSegmentBtn : els.scriptText, els.synthesizeBtn, els.mergePreviewBtn][step];
+    if (target.disabled) { showToast(Number(button.dataset.workflowStep) > 1 ? '请先完成前面的步骤：添加视频、文字或语音。' : '请先添加一个视频'); return; }
+    target.scrollIntoView({block:'nearest'});target.focus();
+  }));
+  document.addEventListener('click', event => { if (!event.target.closest('.project-menu')) document.querySelector('.project-menu').open=false; });
+  for (const button of [els.saveAsProjectBtn,els.revealProjectBtn]) button.addEventListener('click',()=>document.querySelector('.project-menu').open=false);
+  document.addEventListener('keydown', event => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase()==='s') { event.preventDefault();document.activeElement?.blur();void saveProjectNow().then(() => showToast(state.project ? '项目已保存' : '添加视频后会自动创建项目')).catch(reportError); }
+  });
   els.openProjectBtn.addEventListener("click", () => handleOpenProject().catch(reportError));
   els.importBtn.addEventListener("click", () => handleImport().catch(reportError));
   els.recordBtn.addEventListener("click", () => openRecordDialog().catch(reportError));

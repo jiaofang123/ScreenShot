@@ -19,9 +19,9 @@ export function attachSortable(container, { selector, id, commit }) {
     if (!drag?.active) return;
     const rect = drag.scroller === document.scrollingElement
       ? { top: 0, bottom: innerHeight } : drag.scroller.getBoundingClientRect();
-    const edge = Math.min(36, (rect.bottom - rect.top) / 4);
-    const delta = drag.y < rect.top + edge ? -Math.min(14, (rect.top + edge - drag.y) / 2)
-      : drag.y > rect.bottom - edge ? Math.min(14, (drag.y - rect.bottom + edge) / 2) : 0;
+    const edge = Math.max(20, Math.min(40, (rect.bottom - rect.top) / 4));
+    const delta = drag.y < rect.top + edge ? -Math.min(20, Math.max(6, (rect.top + edge - drag.y) / 2))
+      : drag.y > rect.bottom - edge ? Math.min(20, Math.max(6, (drag.y - rect.bottom + edge) / 2)) : 0;
     if (delta) { drag.scroller.scrollTop += delta; move(); }
     frame = requestAnimationFrame(scroll);
   }

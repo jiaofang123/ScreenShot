@@ -219,6 +219,12 @@ async function prepareRound() {
   setPhase('waiting');
 }
 async function refreshNativeSources() {
+  $('mode-help').textContent = {
+    window:'只想录一个应用？选好下方窗口，再点“开始录制”。没有找到时，先打开应用，再刷新来源。',
+    desktop:'将录制所选屏幕的整个画面，ScreenShot 的工具窗口和录屏控制页会自动排除。',
+    tab:'开始后会弹出浏览器共享面板。请选择你要录的标签页，再确认共享。',
+    region:config?.nativeCapture?'先选择屏幕，再点“框选录制区域”。拖动框选、四角调整，按 Enter 确认后再开始录制。':'先共享屏幕，再在预览中框选。拖动四角可调整范围，最后点击“开始录制选区”。'
+  }[$('mode').value];
   $('native-target').hidden = !usesNative();
   $('select-region').hidden = !usesNative() || $('mode').value !== 'region';
   $('title').textContent = `录制${names[$('mode').value]}`;

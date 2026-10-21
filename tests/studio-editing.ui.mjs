@@ -129,7 +129,7 @@ try{
   console.log('PASS: full-card merge drag, unchecked-card sorting, fixed IDs through reload, real merge matches visual selected order');
   await editor.locator('[data-asset-id="a1"] .item-meta').click();
   const frame=page.frames().find(frame=>frame.url().endsWith('/studio/index.html'));
-  await frame.waitForFunction(()=>document.getElementById('videoPreview').readyState>=2&&document.getElementById('videoPreview').duration===3);
+  await page.frames().find(frame=>frame.url().endsWith('/studio/index.html')).waitForFunction(()=>document.getElementById('videoPreview').readyState>=2&&document.getElementById('videoPreview').duration===3);
   await editor.locator('#insertTextBtn').click();await editor.locator('.text-overlay-content').fill('时间设置验证');
   await editor.locator('#textDuration').fill('0.7');await editor.locator('#textDuration').press('Tab');
   await editor.locator('#textStartTime').fill('1.2');await editor.locator('#textStartTime').press('Tab');
@@ -176,8 +176,10 @@ try{
   assert.equal(await editor.locator('#textOverlayText').inputValue(),'末尾延长画面中的文字');
   await editor.locator('#synthesizeBtn').click();await editor.locator('#toast').getByText('合成视频已覆盖并加入音视频合并列表').waitFor({timeout:60000});
   assert.ok(pixel(rendered.path,4.5,.39,.23)[0]<100);
+  assert.ok(await editor.locator('#videoPreview').evaluate(video=>video.src.includes('revision=')),'Overwritten results need a fresh playback URL');
   console.log('PASS: detail text editing, two-way sync, audio-longer-than-video, pending/burned text retained in merge preview/export and overwrite');
   await editor.locator('[data-asset-id="a1"] .item-meta').click();
+  await editor.locator('[data-delete-voice-id="v1"]').click();await editor.locator('#deleteSegmentDialog button[value="cancel"]').click();
   await editor.locator('[data-delete-segment-id="s1"]').click();await editor.locator('#deleteSegmentDialog button[value="cancel"]').click();assert.ok((await stat(voiceFiles[0])).isFile());
   await editor.locator('[data-segment-title-id="s1"]').fill('删除中的卡片');
   await editor.locator('#previewVoiceBtn').click();
@@ -192,8 +194,18 @@ try{
   assert.equal(await editor.locator('#scriptText').isDisabled(),true);
   await open();await editor.locator('[data-asset-id="a1"] .item-meta').click();assert.equal(await editor.locator('#segmentList .segment-list-item').count(),0);
   await editor.locator('#addSegmentBtn').click();await editor.locator('#segmentList .segment-list-item').waitFor();assert.equal(await editor.locator('#scriptText').isEnabled(),true);
+  await page.frames().find(frame=>frame.url().endsWith('/studio/index.html')).waitForFunction(()=>document.getElementById('videoPreview').readyState>=2&&document.getElementById('videoPreview').duration===3);
+  await editor.locator('[data-text-overlay-list-id]').click();await editor.locator('#deleteTextOverlayBtn').click();
+  await editor.locator('#workflowNext').getByText('更新合成视频',{exact:true}).waitFor();await editor.locator('#workflowNext').click();
+  await editor.locator('#toast').getByText('合成视频已覆盖并加入音视频合并列表').waitFor({timeout:60000});
+  assert.ok(pixel(rendered.path,2,.39,.23)[0]>220,'Removing the last text/voice must allow restoring the original video');
+  assert.equal((await saved()).assets.find(asset=>asset.id==='a1').renderVersions[0].id,'r1');
+  await editor.locator('[data-delete-render-id="r1"]').click();await editor.locator('#deleteSegmentDialog button[value="cancel"]').click();
+  await editor.locator('[data-delete-asset-id="a8"]').click();await editor.locator('#deleteSegmentDialog button[value="cancel"]').press('Escape');
+  await editor.locator('#deleteSegmentDialog').waitFor({state:'hidden'});assert.equal(await editor.locator('[data-asset-id="a8"]').count(),1);
+  await editor.locator('[data-delete-asset-id="a8"]').click();await editor.locator('#deleteSegmentDialog button[value="delete"]').click();await editor.locator('[data-asset-id="a8"]').waitFor({state:'detached'});
   assert.deepEqual(errors,[]);
-  const report={result:'PASS',browser:process.env.TEST_BROWSER||'chromium',directory,projectRoot:project.rootDir,render:rendered.path,merge:lastMerge.path,cases:['asset/merge pointer and keyboard sorting','autoscroll and cancel','stable numbers and reload','async save race','real speech file deletion while playing','delete last card and explicit add','text timing preview/export and exact endpoints','overwrite existing render']};
+  const report={result:'PASS',browser:process.env.TEST_BROWSER||'chromium',directory,projectRoot:project.rootDir,render:rendered.path,merge:lastMerge.path,cases:['asset/merge pointer and keyboard sorting','autoscroll and cancel','stable numbers and reload','async save race','real speech file deletion while playing','delete last card and explicit add','text timing preview/export and exact endpoints','overwrite existing render and reload cached playback','detail content two-way sync','last-frame text in preview and export','remove all overlays and reset original in place','in-page removal cancel and Escape']};
   await writeFile(join(directory,'results.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));
 }catch(error){await page.screenshot({path:join(directory,'failure.png')});console.error({directory,errors});throw error;}
 finally{await browser.close();worker.stdin.end();lines.close();worker.kill();}

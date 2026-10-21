@@ -16,35 +16,42 @@
             <p id="projectSubtitle">未打开项目</p>
           </div>
         </div>
-        <div class="toolbar"><span id="mediaStatus" class="item-meta">正在检查媒体组件…</span>
+        <div class="toolbar"><span id="mediaStatus" class="item-meta">正在检查视频功能…</span><span id="projectSaveStatus" class="save-status" role="status">修改会自动保存</span>
           <button class="secondary" id="newProjectBtn">新建项目</button>
           <button class="secondary" id="saveProjectBtn">保存项目</button>
           <button class="secondary" id="openProjectBtn">打开项目</button>
+          <details class="project-menu"><summary>更多</summary><div><button id="saveAsProjectBtn" class="secondary">项目另存为…</button><button id="revealProjectBtn" class="secondary">打开项目文件夹</button></div></details>
         </div>
       </header>
+
+      <section class="workflow-guide" aria-label="视频制作操作引导">
+        <ol class="workflow-steps"><li><button data-workflow-step="0">1 添加视频</button></li><li><button data-workflow-step="1">2 编辑文字 / 配音</button></li><li><button data-workflow-step="2">3 合成音视频</button></li><li><button data-workflow-step="3">4 预览并导出</button></li></ol>
+        <div class="workflow-next"><div><strong id="workflowTitle">先添加一个视频</strong><p id="workflowHint">可以导入已有视频，也可以直接录屏。项目会自动创建并保存。</p></div><button id="workflowNext" class="primary">导入视频</button></div>
+      </section>
 
       <main class="workspace">
         <aside class="sidebar">
           <section class="panel">
             <div class="panel-title">
-              <h2>素材列表（<span id="assetCount">0</span>）</h2>
+              <h2>视频素材（<span id="assetCount">0</span>）</h2>
               <div class="panel-actions">
                 <button class="primary small" id="recordBtn">录屏</button>
                 <button class="secondary small" id="importBtn">导入视频</button>
               </div>
             </div>
             <div class="list" id="assetList"></div>
+            <p class="panel-help">点击视频查看和编辑；拖动卡片调整顺序。</p>
           </section>
 
           <section class="panel inserted-text-panel">
             <div class="panel-title">
-              <h2>插入文字详情列表（<span id="insertedTextCount">0</span>）</h2>
+              <h2>插入文字详情（<span id="insertedTextCount">0</span>）</h2>
             </div>
             <div class="inserted-text-list" id="insertedTextList"></div>
             <div id="textTimingPanel" class="text-timing-panel" hidden>
               <label class="text-content-field">文字内容<textarea id="textOverlayText" rows="3" aria-label="插入文字内容" placeholder="输入文字"></textarea></label>
-              <label>插入时间（秒）<input id="textStartTime" type="number" min="0" step="0.001" aria-label="文字插入时间（秒）"></label>
-              <label>显示时长（秒）<input id="textDuration" type="number" min="0.1" step="0.001" aria-label="文字显示时长（秒）"></label>
+              <label>从第几秒出现<input id="textStartTime" type="number" min="0" step="0.001" aria-label="文字插入时间（秒）"></label>
+              <label>显示几秒<input id="textDuration" type="number" min="0.1" step="0.001" aria-label="文字显示时长（秒）"></label>
               <span id="textEndTime" class="item-meta"></span>
             </div>
           </section>
@@ -55,8 +62,9 @@
             <div>
               <h2 id="previewTitle">预览</h2>
               <p id="previewMeta">请选择素材</p>
+              <p id="outputFeedback" class="output-feedback" hidden><span id="outputMessage"></span><button id="revealOutputBtn" class="text-button">打开文件位置</button></p>
             </div>
-            <button class="secondary small" id="insertTextBtn" disabled>插入文字</button>
+            <div class="preview-actions"><button class="secondary small" id="backToOriginalBtn" hidden>编辑原视频</button><button class="secondary small" id="insertTextBtn" disabled>插入文字</button></div>
           </div>
 
           <div class="video-frame">
@@ -85,8 +93,8 @@
               <button class="delete-icon-button" id="deleteTextOverlayBtn" title="删除文字" aria-label="删除文字">×</button>
             </div>
             <div class="empty-preview" id="emptyPreview">
-              <strong>暂无预览</strong>
-              <span>录屏或导入视频后显示</span>
+              <strong>添加视频，从这里开始</strong>
+              <span>点左上方“导入视频”或“录屏”，无需先建项目</span>
             </div>
           </div>
 
@@ -99,31 +107,32 @@
               </div>
             </div>
             <div class="queue" id="mergeQueue"></div>
-            <p class="sort-help">拖动卡片或手柄调整合并顺序，编号固定；手柄也可用上下方向键排序。</p>
+            <p id="mergeHelp" class="sort-help">勾选要导出的片段，拖动调整播放顺序；编号固定，手柄也可用方向键排序。</p>
           </div>
         </section>
 
         <aside class="inspector">
           <section class="panel script-panel">
             <div class="panel-title">
-              <h2>文字稿</h2>
+              <h2>旁白文字稿</h2>
               <button class="secondary small" id="addSegmentBtn">添加</button>
             </div>
 
             <div class="script-body">
+              <p class="panel-help">填写旁白 → 生成语音 → 试听 → 合成。也可以只插入文字，跳过配音。</p>
               <div class="segment-list" id="segmentList"></div>
 
               <label class="field">
-                <span>时间范围</span>
+                <span>旁白从哪一秒开始、在哪一秒结束</span>
                 <div class="time-fields">
-                  <input id="segmentStart" type="number" min="0" step="0.1" value="0">
-                  <input id="segmentEnd" type="number" min="0" step="0.1" value="10">
+                  <input id="segmentStart" type="number" min="0" step="0.1" value="0" aria-label="旁白开始时间（秒）">
+                  <input id="segmentEnd" type="number" min="0" step="0.1" value="10" aria-label="旁白结束时间（秒）">
                 </div>
               </label>
 
               <label class="field">
                 <span>文字内容</span>
-                <textarea id="scriptText" rows="8" placeholder="输入旁白文字"></textarea>
+                <textarea id="scriptText" rows="5" placeholder="写下想让配音朗读的话，例如：首先点击右上角的设置。"></textarea>
               </label>
 
               <label class="field"><span>语音来源</span><select id="voiceProvider"><option value="edge">Edge 中文女声 · 联网</option><option value="local">本机语音 · 离线</option></select><small class="voice-privacy">在线语音会将文字稿发送到语音服务；视频文件在本机处理。</small></label>
@@ -139,9 +148,9 @@
             </div>
 
             <div class="button-row">
-              <button class="secondary" id="generateVoiceBtn">生成语音</button>
-              <button class="secondary" id="previewVoiceBtn">试听</button>
-              <button class="primary" id="synthesizeBtn">合成音视频</button>
+              <button class="secondary" id="generateVoiceBtn" title="把文字读成语音；再次生成会覆盖原语音">生成语音</button>
+              <button class="secondary" id="previewVoiceBtn" title="先生成语音，再试听">试听</button>
+              <button class="primary" id="synthesizeBtn" title="把当前视频、旁白和插入文字合成一个视频；再次合成会覆盖原结果">合成音视频</button>
             </div>
           </section>
 
@@ -220,7 +229,7 @@
         <div class="button-row"><button class="secondary" value="cancel" autofocus>取消</button><button class="danger" value="delete">确认删除</button></div>
       </form>
     </dialog>
-    <div class="toast" id="toast"></div>
+    <div class="toast" id="toast" role="status"><span id="toastMessage"></span><button id="closeToast" aria-label="关闭提示">×</button></div>
     <script src="./bridge.js"></script>
     <script src="./app.js" type="module"></script>
   </body>

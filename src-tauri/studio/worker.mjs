@@ -1015,7 +1015,8 @@ async function generateVoiceWithWindowsSapi(values) {
     const { filters: videoFilters, normalized: normalizedTextOverlays } = await buildTextOverlayFilters({
       projectRoot: payload.projectRoot, outputId, textOverlays, videoDuration
     });
-    if (!overlays.length && !normalizedTextOverlays.length) {
+    if (!overlays.length && !normalizedTextOverlays.length &&
+        !(payload.resetComposition === true && payload.existingRenderId && payload.existingRenderPath)) {
       throw new Error("没有可合成的有效旁白语音或文字。");
     }
 

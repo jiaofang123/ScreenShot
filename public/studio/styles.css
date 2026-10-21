@@ -1205,3 +1205,61 @@ textarea { resize:vertical; }.text-style-panel { color:#dce6f2; background:#1929
 .toolbar #mediaStatus { font-size:10px; max-width:150px; }
 @media (max-width: 1100px) { .workspace { grid-template-columns:190px minmax(270px,1fr) 245px; padding:6px; gap:6px; } .toolbar #mediaStatus { display:none; } .panel { padding:9px; } .toolbar { gap:5px; } }
 @media (max-width: 850px) { .workspace { grid-template-columns:165px minmax(270px,1fr) 230px; overflow-x:auto; } .brand p {max-width:180px;} }
+
+/* Keep the next action visible while each editing panel scrolls independently. */
+.app-shell { grid-template-rows: auto auto minmax(0, 1fr); }
+.topbar { min-height: 52px; flex-wrap: wrap; }
+.toolbar { flex-wrap: wrap; justify-content: flex-end; }
+.save-status { color: var(--green); font-size: 11px; }
+.save-status.failed { color: #ffb4ba; }
+.workflow-guide { padding: 8px 14px 10px; border-bottom: 1px solid var(--line); background: #101c26; }
+.workflow-steps { display: flex; gap: 8px; padding: 0; margin: 0 0 8px; list-style: none; }
+.workflow-steps button { padding: 5px 10px; color: var(--muted); background: transparent; border: 1px solid transparent; font-size: 11px; }
+.workflow-steps button.current { color: #9cebcf; background: #19382d; border-color: #325e4d; }
+.workflow-next { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.workflow-next strong { font-size: 13px; }
+.workflow-next p { color: var(--muted); font-size: 11px; line-height: 1.6; margin-top: 3px; }
+.workflow-next button { flex-shrink: 0; min-width: 116px; }
+.project-menu { position: relative; font-size: 12px; }
+.project-menu summary { cursor: pointer; padding: 8px; color: #c9d8e5; }
+.project-menu > div { position: absolute; z-index: 12; right: 0; top: 100%; display: grid; gap: 6px; min-width: 160px; padding: 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); box-shadow: 0 8px 25px #0008; }
+.panel-help { padding: 8px 12px; color: #94aabd; font-size: 11px; line-height: 1.6; }
+.empty-list { padding: 14px 8px; color: #a3b7c8; font-size: 12px; line-height: 1.8; }
+.empty-list strong { color: #d4e4ed; }
+.preview-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.sidebar .panel-title { flex-wrap: wrap; gap: 8px; }
+.sidebar .panel-title h2 { white-space: nowrap; }
+.preview-head > div:first-child { min-width: 0; }
+.output-feedback { color: var(--green) !important; font-size: 11px !important; line-height: 1.6; }
+.text-button { border: 0; padding: 0 6px; color: #9cebcf; text-decoration: underline; background: transparent; font-size: 11px; }
+.sidebar { grid-template-rows: minmax(130px, 1fr) minmax(180px, 32%); }
+.sidebar:has(#textTimingPanel:not([hidden])) { grid-template-rows: minmax(130px, 1fr) minmax(290px, 48%); }
+.inserted-text-panel { overflow: auto; }
+.inserted-text-list { flex-shrink: 0; min-height: 50px; }
+.text-timing-panel { flex-shrink: 0; }
+.text-timing-panel textarea { min-height: 64px; }
+.script-body { padding-bottom: 58px; }
+.delete-confirm-dialog .button-row { position: static; grid-template-columns: 1fr 1fr; padding: 16px 0 0; margin-top: 8px; background: transparent; border: 0; }
+.toast { display: flex; align-items: center; gap: 12px; max-width: min(600px, 90vw); top: 16px; z-index: 30; }
+.toast.show { pointer-events: auto; }
+.toast button { padding: 1px 5px; background: transparent; color: inherit; font-size: 20px; }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.stage .merge-panel { overflow: auto; }
+.stage { grid-template-rows: auto minmax(150px, 1fr) clamp(200px, 28vh, 260px); }
+@media (max-width: 1100px) {
+  .brand p { max-width: 180px; }
+  .toolbar { gap: 4px; }
+  .toolbar button { font-size: 11px; padding: 7px 8px; }
+  .save-status { font-size: 10px; }
+  .workspace { grid-template-columns: minmax(185px, .8fr) minmax(300px, 1.5fr) minmax(255px, 1fr); }
+}
+@media (max-width: 850px) {
+  .workspace { grid-template-columns: 220px minmax(300px, 1fr); overflow: auto; height: auto; }
+  .sidebar { min-height: 620px; }
+  .stage { min-height: 620px; }
+  .inspector { grid-column: 1 / -1; grid-template-columns: 1fr 1fr; grid-template-rows: minmax(460px, auto); }
+  .workflow-steps { flex-wrap: wrap; gap: 3px; }
+  .workflow-next { align-items: flex-start; }
+  .empty-preview span { max-width: 230px; text-align: center; font-size: 12px; line-height: 1.7; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }

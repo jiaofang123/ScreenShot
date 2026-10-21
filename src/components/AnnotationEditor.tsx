@@ -451,9 +451,9 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
           </span>
         </div>
         <div className="zoom-controls">
-          <button onClick={() => zoomBy(0.85)}>−</button>
+          <button aria-label="缩小截图" title="缩小" onClick={() => zoomBy(0.85)}>−</button>
           <output>{Math.round(zoom * 100)}%</output>
-          <button onClick={() => zoomBy(1.18)}>＋</button>
+          <button aria-label="放大截图" title="放大" onClick={() => zoomBy(1.18)}>＋</button>
           <button onClick={fitWidth}>适合宽度</button>
           <button onClick={fitAll}>显示全部</button>
         </div>
@@ -584,7 +584,7 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
             }}>添加文字</button>
           </div>
         ) : (
-          <div className="viewport-help">{tool === "text" ? "点击截图添加文字 · 可调整颜色和字号" : "滚轮缩放 · 空格/中键拖动 · Ctrl/Cmd+Z 撤销"}</div>
+          <div className="viewport-help">{{text:"点击图片放置文字，输入后点“添加文字”",arrow:"按住鼠标拖动，画出箭头",rect:"按住鼠标拖动，框出重点",pen:"按住鼠标自由绘画",mosaic:"拖动覆盖需要隐藏的内容",pan:"按住鼠标拖动画面"}[tool]} · 滚轮缩放 · Ctrl/Cmd+Z 撤销</div>
         )}
       </div>
     </main>

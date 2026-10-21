@@ -78,7 +78,7 @@ export default function BrowserRecordingPanel({ onNotify, lockedMode, onEditVide
   return (
     <section className="recording-panel">
       <div className="recording-heading"><div><span className="eyebrow">SCREEN RECORDING</span><h2>录下需要的内容</h2></div><span className={`recording-badge ${active ? "active" : ""}`}>{status ? labels[status.phase] : "准备录制"}</span></div>
-      <p className="recording-intro">选择录制范围，在浏览器共享面板授权后开始。视频自动保存到用户目录下的 screenshot / 日期文件夹。</p>
+      <p className="recording-intro">点击“开始录屏”会打开录屏设置页。选择要录制的标签页并授权共享，停止后视频自动保存；可在设置页继续录下一段。</p>
       <fieldset className="recording-sources" hidden disabled={active || busy}>
         <legend>录制来源</legend>
         {modes.map(item => <label key={item.value} className={`recording-source ${mode === item.value ? "selected" : ""}`}>

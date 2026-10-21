@@ -58,7 +58,7 @@ await page.addInitScript(() => {
 });
 const importedPaths = () => page.evaluate(() => window.calls.filter(call => call.cmd === 'studio_call' && call.args.method === 'project:importVideos').flatMap(call => call.args.payload.paths));
 const settle = () => page.waitForTimeout(150);
-const assertStudio = async () => assert.equal(await page.locator('.mode-tabs button.selected').innerText(), '视频制作');
+const assertStudio = async () => assert.equal(await page.locator('.mode-tabs button.selected').getAttribute('aria-label'), '视频制作');
 try {
   await page.goto('http://127.0.0.1:1420');
   await page.getByRole('button', { name: '视频制作', exact: true }).click();
@@ -115,13 +115,18 @@ try {
   // Standalone native recording uses a daily default, without auto-importing.
   await page.getByRole('button',{name:'录屏',exact:true}).click();
   await page.getByRole('combobox',{name:'录屏画质',exact:true}).selectOption('2k');
+  const startsBefore=await page.evaluate(()=>window.calls.filter(call=>call.cmd==='start_native_recording').length);
+  await page.getByRole('button',{name:'开始录屏',exact:true}).click();
+  await page.getByRole('button',{name:'取消开始',exact:true}).click();
+  await page.getByRole('button',{name:'开始录屏',exact:true}).waitFor({timeout:5000});
+  assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.cmd==='start_native_recording').length),startsBefore);
   await page.getByRole('button',{name:'开始录屏',exact:true}).click();
   await page.getByText('本次录屏已开始',{exact:true}).waitFor({timeout:10000});
   const native=await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_native_recording'));
   assert.equal(native.args.options.resolution,'2k');
   assert.match(native.args.path,/^\/Users\/test\/screenshot\/\d{4}-\d{2}-\d{2}\/current.mp4$/);
   await page.getByRole('button',{name:'停止并保存',exact:true}).click();await settle();
-  assert.equal(await page.locator('.mode-tabs button.selected').innerText(),'录屏');
+  assert.equal(await page.locator('.mode-tabs button.selected').getAttribute('aria-label'),'录屏');
   assert.equal((await importedPaths()).length,3);
   // The compatibility/tab entry carries the same 2K choice through IPC.
   await page.getByRole('radio',{name:/浏览器页签/}).check();
