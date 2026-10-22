@@ -78,7 +78,7 @@ fn main() {
                             browser: Some("chrome".into()),
                         },
                         destination,
-                        "Hardware integration".into(),
+                        "Google Chrome".into(),
                         Arc::new(|_| {}),
                         Some(app.clone()),
                     )
@@ -100,8 +100,15 @@ fn main() {
                             manager.prepare_with_app(
                                 serde_json::from_value(value["options"].clone()).unwrap(),
                                 PathBuf::from(value["path"].as_str().unwrap()),
-                                "Hardware integration".into(), Arc::new(|_| {}), Some(app.clone()),
+                                "Google Chrome".into(), Arc::new(|_| {}), Some(app.clone()),
                             ).map(|value| serde_json::json!({"url":value.url,"status":value.status,"reusedController":value.reused_controller}))
+                        } else if value["openController"] == true {
+                            let profile = std::env::var("SCREENSHOT_QA_CHROME_PROFILE").unwrap();
+                            recording::open_recording_session(app.clone(), serde_json::from_value(value["options"].clone()).unwrap(), value["path"].as_str().unwrap().into(), move |url, _| {
+                                let status = std::process::Command::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").arg(format!("--user-data-dir={profile}")).arg(format!("--app={url}")).status().map_err(|e| e.to_string())?;
+                                if status.success() { Ok(()) } else { Err("QA Chrome did not launch".into()) }
+                            })
+                                .map(|value| serde_json::json!({"status":value}))
                         } else { manager
                             .start_native(
                                 app.clone(),
@@ -110,11 +117,18 @@ fn main() {
                                 PathBuf::from(value["path"].as_str().unwrap()),
                             )
                             .map(|status| serde_json::json!(status)) }
-                    } else if matches!(line.as_str(), "window-state" | "hide-main" | "reopen-main") {
+                    } else if matches!(line.as_str(), "window-state" | "hide-main" | "reopen-main" | "fullscreen-main" | "normal-main") {
                         let window = app.get_webview_window("main").unwrap();
                         if line == "hide-main" { let _ = window.hide(); }
                         if line == "reopen-main" { crate::app_window::show_main_window(&app); }
-                        Ok(serde_json::json!({"visible":window.is_visible().unwrap(),"minimized":window.is_minimized().unwrap(),"focused":window.is_focused().unwrap()}))
+                        if line == "fullscreen-main" { let _ = window.set_fullscreen(true); crate::app_window::show_main_window(&app); }
+                        if line == "normal-main" { let _ = window.set_fullscreen(false); }
+                        let windows = xcap::Window::all().unwrap_or_default();
+                        let active = windows.iter().any(|w| w.pid().ok() == Some(std::process::id()) && w.is_focused().unwrap_or(false));
+                        let controller_title = std::env::var("SCREENSHOT_QA_CONTROLLER_TITLE").unwrap_or_else(|_| "ScreenShot · 本机录屏".into());
+                        let controller_focused = windows.iter().any(|w| w.title().unwrap_or_default().contains(&controller_title) && w.is_focused().unwrap_or(false));
+                        let controllers = windows.iter().filter(|w| w.title().unwrap_or_default().contains("ScreenShot · 本机录屏")).map(|w| serde_json::json!({"title":w.title().ok(),"pid":w.pid().ok(),"active":w.is_focused().ok()})).collect::<Vec<_>>();
+                        Ok(serde_json::json!({"visible":window.is_visible().unwrap(),"minimized":window.is_minimized().unwrap(),"focused":window.is_focused().unwrap(),"fullscreen":window.is_fullscreen().unwrap(),"appActive":active,"controllerFocused":controller_focused,"controllers":controllers}))
                     } else {
                         manager
                             .control(&line)

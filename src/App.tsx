@@ -7,7 +7,7 @@ import StudioWorkspace, { type StudioRecording } from "./components/StudioWorksp
 import { recordingPath } from "./recordingPaths";
 import type { CapturePayload, LongCaptureStatus } from "./types";
 
-type RecordingStatus = { id: string; controllerId?: string; phase: string; filePath: string | null };
+type RecordingStatus = { id: string; controllerId?: string; phase: string; filePath: string | null; message?: string };
 
 function App() {
   const [capture, setCapture] = useState<CapturePayload | null>(null);
@@ -59,6 +59,7 @@ function App() {
       studioProject.current = projectRoot;
       const latest = latestRecording.current;
       studioStatus(latest && (latest.id === studioController.current || latest.controllerId === studioController.current) ? latest : status);
+      return { message: status.message };
     } finally { preparingRecording.current = false; latestRecording.current = null; }
   }, [studioStatus]);
 

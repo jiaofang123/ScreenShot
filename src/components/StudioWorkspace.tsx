@@ -5,7 +5,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 type MediaPayload = Record<string, unknown>;
 export type StudioRecording = { path: string; projectRoot?: string };
 export default function StudioWorkspace({ visible, topCollapsed, recording, onImported, onRecord, onNotify }: {
-  visible: boolean; topCollapsed: boolean; recording: StudioRecording | null; onImported: () => void; onRecord: (project: { projectRoot: string }) => Promise<void>; onNotify: (message: string) => void;
+  visible: boolean; topCollapsed: boolean; recording: StudioRecording | null; onImported: () => void; onRecord: (project: { projectRoot: string }) => Promise<{ message?: string } | void>; onNotify: (message: string) => void;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);

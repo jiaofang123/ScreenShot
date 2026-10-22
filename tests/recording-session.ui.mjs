@@ -145,6 +145,19 @@ try {
   await page.getByText('设置页初始化失败',{exact:true}).waitFor();
   assert.equal(await page.getByRole('button',{name:'开始录屏',exact:true}).isEnabled(),true);
   assert.equal((await importedPaths()).length,3);
+  // Clicking Record again after each completed clip must enable the button,
+  // show feedback, retain fullscreen and accept the next clip into this project.
+  await page.getByRole('button',{name:'视频制作',exact:true}).click();
+  for(let round=0;round<2;round++){
+    const previous=await page.evaluate(()=>window.recordStatus.id);
+    await editor.locator('#recordBtn').click();
+    await page.waitForFunction(previous=>window.recordStatus.id!==previous,previous);
+    await editor.locator('#toast').getByText('本次录屏已开始',{exact:true}).waitFor();
+    assert.equal(await editor.locator('#recordBtn').isEnabled(),true);
+    assert.equal(await page.evaluate(()=>window.fullscreen),true);
+    await page.evaluate(round=>window.statusEvent({...window.recordStatus,phase:'saved',filePath:`/tmp/ScreenShot-repeat-${round}.mp4`}),round);
+    await editor.locator('#assetCount').getByText(String(4+round),{exact:true}).waitFor();
+  }
   assert.deepEqual(errors, []);
   console.log('PASS: studio opens controller directly, fullscreen retained, no save dialog, project/daily paths, stale/deleted protection, failed/cancelled start, fast completion, continuation ownership, single import');
 } finally { await browser.close(); }

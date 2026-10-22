@@ -2464,7 +2464,10 @@ async function openRecordDialog() {
     setBusy(els.recordBtn, true, "打开设置中");
     try {
       const project = await ensureProject();
-      if (project) await bridge.requestRecording({ projectRoot: project.rootDir });
+      if (project) {
+        const result = await bridge.requestRecording({ projectRoot: project.rootDir });
+        showToast(result?.message || "录屏设置已打开，请选择目标并开始录制");
+      }
     } finally { setBusy(els.recordBtn, false); }
     return;
   }

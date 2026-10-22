@@ -331,6 +331,18 @@ impl RecordingManager {
         sink: EventSink,
         app: Option<AppHandle>,
     ) -> Result<PreparedRecording, String> {
+        self.prepare_controller(options, path, browser, sink, app, true)
+    }
+
+    fn prepare_controller(
+        &self,
+        options: RecordingOptions,
+        path: PathBuf,
+        browser: String,
+        sink: EventSink,
+        app: Option<AppHandle>,
+        reuse_controller: bool,
+    ) -> Result<PreparedRecording, String> {
         if !matches!(options.fps, 15 | 30 | 60) {
             return Err("录屏帧率仅支持 15、30 或 60 fps".into());
         }
@@ -399,7 +411,8 @@ impl RecordingManager {
         if let Some(previous) = current.as_ref() {
             // A completed or unused controller can navigate in its existing
             // window, including when the project/destination has changed.
-            reused_controller = previous.connected.load(Ordering::Acquire)
+            reused_controller = reuse_controller
+                && previous.connected.load(Ordering::Acquire)
                 && !previous.shutdown.load(Ordering::Acquire)
                 && !previous.url.is_empty()
                 && previous.status.lock().browser == status.browser;
@@ -1655,12 +1668,25 @@ pub fn get_recording_status(state: State<'_, RecordingManager>) -> Option<Record
 }
 
 #[tauri::command]
-pub fn start_recording_session(
+pub async fn start_recording_session(
     app: AppHandle,
-    state: State<'_, RecordingManager>,
     options: RecordingOptions,
     path: String,
 ) -> Result<RecordingStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        open_recording_session(app, options, path, open_browser)
+    })
+    .await
+    .map_err(|error| format!("打开录屏设置失败：{error}"))?
+}
+
+pub(crate) fn open_recording_session(
+    app: AppHandle,
+    options: RecordingOptions,
+    path: String,
+    opener: impl FnOnce(&str, Option<&str>) -> Result<(), String>,
+) -> Result<RecordingStatus, String> {
+    let state = app.state::<RecordingManager>();
     let event_app = app.clone();
     let sink: EventSink = Arc::new(move |status| {
         let manager = event_app.state::<RecordingManager>();
@@ -1675,16 +1701,34 @@ pub fn start_recording_session(
         }
     });
     let (browser, _) = recording_browser(options.browser.as_deref())?;
-    let prepared =
-        state.prepare_with_app(options, path.into(), browser, sink, Some(app.clone()))?;
+    // A fresh app window gets a user-initiated native launch/activation. Merely
+    // navigating an old browser window cannot reliably cross macOS fullscreen
+    // Spaces. Retire the old controller first; continuation inside a controller
+    // still uses its existing page and independent files.
+    let previous = state.current.lock().clone();
+    let prepared = state.prepare_controller(
+        options,
+        path.into(),
+        browser,
+        sink,
+        Some(app.clone()),
+        false,
+    )?;
     let preference = state
         .current
         .lock()
         .as_ref()
         .and_then(|session| session.status.lock().options.browser.clone());
+    if let Some(previous) = previous {
+        let since = Instant::now();
+        while previous.connected.load(Ordering::Acquire) && since.elapsed() < Duration::from_secs(1)
+        {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
     if !prepared.reused_controller {
         let session = state.current.lock().clone().ok_or("没有录屏任务")?;
-        if let Err(error) = launch_controller(&session, preference.as_deref()) {
+        if let Err(error) = launch_controller_with(&session, preference.as_deref(), opener) {
             let _ = state.control("cancel");
             return Err(error);
         }
@@ -1712,11 +1756,19 @@ pub fn reopen_recording_browser(state: State<'_, RecordingManager>) -> Result<()
 }
 
 fn launch_controller(session: &Session, browser: Option<&str>) -> Result<(), String> {
+    launch_controller_with(session, browser, open_browser)
+}
+
+fn launch_controller_with(
+    session: &Session,
+    browser: Option<&str>,
+    opener: impl FnOnce(&str, Option<&str>) -> Result<(), String>,
+) -> Result<(), String> {
     let mut launched = session.browser_launch.lock();
     if launched.is_some_and(|time| time.elapsed() < Duration::from_secs(15)) {
         return Err("录屏页面正在打开，请稍候".into());
     }
-    open_browser(&session.url, browser)?;
+    opener(&session.url, browser)?;
     *launched = Some(Instant::now());
     Ok(())
 }
