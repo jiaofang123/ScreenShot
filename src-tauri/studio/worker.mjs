@@ -195,9 +195,9 @@ function defaultDrawtextFontFile() {
     ]
     : process.platform === "win32"
       ? [
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/arial.ttf"
+        join(process.env.WINDIR || process.env.SystemRoot || "C:/Windows", "Fonts", "msyh.ttc"),
+        join(process.env.WINDIR || process.env.SystemRoot || "C:/Windows", "Fonts", "simhei.ttf"),
+        join(process.env.WINDIR || process.env.SystemRoot || "C:/Windows", "Fonts", "arial.ttf")
       ]
       : [
         "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
@@ -1103,7 +1103,7 @@ async function generateVoiceWithWindowsSapi(values) {
     }
 
     const listContent = mergeItems
-      .map((item) => `file '${String(item.path).replace(/'/g, "'\\''")}'`)
+      .map((item) => `file '${String(item.path).replaceAll("\\", "/").replace(/'/g, "'\\''")}'`)
       .join(os.EOL);
     await writeFile(listFile, `${listContent}${os.EOL}`);
 

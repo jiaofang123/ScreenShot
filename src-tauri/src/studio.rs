@@ -341,7 +341,14 @@ pub fn toggle_studio_fullscreen(app: AppHandle) -> Result<(), String> {
 }
 
 pub fn mix_recording_audio(app: &AppHandle, path: &std::path::Path) -> Result<(), String> {
-    let ffmpeg = resource(app, "studio/node_modules/ffmpeg-static/ffmpeg");
+    let ffmpeg = resource(
+        app,
+        if cfg!(windows) {
+            "studio/node_modules/ffmpeg-static/ffmpeg.exe"
+        } else {
+            "studio/node_modules/ffmpeg-static/ffmpeg"
+        },
+    );
     let metadata = Command::new(&ffmpeg)
         .arg("-hide_banner")
         .arg("-i")

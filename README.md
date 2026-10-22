@@ -57,7 +57,7 @@ Mac 原生录屏使用 ScreenCaptureKit / AVFoundation，需要 macOS 13+，首�
 1. 点击 **视频制作**，录屏或导入已有视频；支持打开原 Narration Studio 保存的项目文件夹。点击 **录屏** 直接打开 Chrome / Edge 设置页，无需切换到工具的录屏页签，也不弹录屏保存对话框。
 2. 给视频添加一个或多个时间范围，输入中文文字稿，选择语速，生成旁白并试听。
 3. 默认 **Edge 中文女声（联网）**：文字稿会发送到在线语音服务。可切换 **本机语音（离线）**；Mac 使用 Tingting，Windows 使用系统语音。视频文件在本机处理。
-4. 可插入文字、调整样式。选中文字或左侧的文字详情卡片后，可直接编辑 **文字内容**、**从第几秒出现** 和 **显示几秒**；结束时间自动计算，不能超出视频范围。预览与合成导出使用同一时间范围。
+4. 可插入文字、调整样式。点击左侧文字详情卡片，在右侧带箭头的浮层中编辑 **文字内容**、**从第几秒出现** 和 **显示几秒**，点击外部或按 Esc 收起；结束时间自动计算，不能超出视频范围。预览与合成导出使用同一时间范围。
 5. 重新生成语音和重新合成均覆盖同一旧结果；不会增加额外历史版本。勾选需要合并的成片，拖动卡片或手柄调整顺序后合并预览、导出；列表中的固定编号用于核对视频，拖拽、取消勾选及重新打开项目均不变。
 6. 修改会自动保存，顶部显示保存状态。**保存项目**（⌘/Ctrl+S）立即保存当前项目；**更多 → 项目另存为**可将素材、文字稿、语音、合成视频及成片打包到其他文件夹。移动文件夹后可通过 **打开项目**继续编辑。**合并导出**生成可分享的最终视频，与保存项目不同。
 
@@ -192,6 +192,8 @@ SCREENSHOT_REAL_CAPTURE=1 node tests/native-recording.integration.mjs
 
 ## Windows 打包
 
+当前整合版的 Windows 兼容性及尚未对齐的录屏能力，见 [Windows 兼容性检查](./WINDOWS_COMPATIBILITY.md)。本次尚未完成 Windows 安装包和真机验收，通用界面回归在 Mac 上执行。
+
 ```powershell
 npm run tauri build -- --bundles nsis
 ```
@@ -201,7 +203,7 @@ npm run tauri build -- --bundles nsis
 - `src-tauri\target\release\screenshot-desktop.exe`
 - `src-tauri\target\release\bundle\nsis\ScreenShot_0.1.0_x64-setup.exe`
 
-说明：当前工程路径包含中文和 WPS 云盘目录，WiX MSI 打包可能报 `LGHT0001 / 0x8007007B`；NSIS 安装包已验证可生成。
+历史截图版本曾验证 NSIS 可生成；此前中文和 WPS 云盘路径下 WiX MSI 报过 `LGHT0001 / 0x8007007B`。当前视频制作整合版仍需 Windows 重新构建及验收。
 
 ## macOS 打包
 

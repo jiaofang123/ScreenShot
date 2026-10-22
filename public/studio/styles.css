@@ -1235,11 +1235,16 @@ textarea { resize:vertical; }.text-style-panel { color:#dce6f2; background:#1929
 .output-feedback { color: var(--green) !important; font-size: 11px !important; line-height: 1.6; }
 .text-button { border: 0; padding: 0 6px; color: #9cebcf; text-decoration: underline; background: transparent; font-size: 11px; }
 .sidebar { grid-template-rows: minmax(130px, 1fr) minmax(180px, 32%); }
-.sidebar:has(#textTimingPanel:not([hidden])) { grid-template-rows: minmax(130px, 1fr) minmax(290px, 48%); }
 .inserted-text-panel { overflow: auto; }
 .inserted-text-list { flex-shrink: 0; min-height: 50px; }
 .text-timing-panel { flex-shrink: 0; }
 .text-timing-panel textarea { min-height: 64px; }
+.text-edit-popover { position: fixed; z-index: 25; width: 320px; max-width: calc(100vw - 24px); padding: 12px; border: 1px solid #517b6a; border-radius: 10px; background: #15232f; box-shadow: 0 12px 36px #0009; }
+.text-edit-popover::before { content: ''; position: absolute; left: -7px; top: calc(var(--arrow-top, 30px) - 6px); width: 12px; height: 12px; transform: rotate(45deg); border-left: 1px solid #517b6a; border-bottom: 1px solid #517b6a; background: #15232f; }
+.text-editor-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.text-editor-heading h2 { font-size: 13px; }
+.text-editor-heading button { padding: 3px 7px; min-width: 26px; height: 26px; }
+.text-edit-popover textarea { max-height: min(180px, 30vh); }
 .script-body { padding-bottom: 58px; }
 .delete-confirm-dialog .button-row { position: static; grid-template-columns: 1fr 1fr; padding: 16px 0 0; margin-top: 8px; background: transparent; border: 0; }
 .toast { display: flex; align-items: center; gap: 12px; max-width: min(600px, 90vw); top: 16px; z-index: 30; }

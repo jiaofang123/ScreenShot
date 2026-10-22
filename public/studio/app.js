@@ -391,6 +391,7 @@ const state = {
   deletingSegmentId: null,
   voiceJobs: new Set(),
   selectedTextOverlayId: null,
+  textEditor: null,
   textOverlayRect: null,
   saveTimer: null,
   saveChain: Promise.resolve(),
@@ -1092,6 +1093,7 @@ function syncInsertedTextListSelection() {
   if (!els.insertedTextList) return;
   els.insertedTextList.querySelectorAll("[data-text-overlay-list-id]").forEach((item) => {
     item.classList.toggle("active", item.dataset.textOverlayListId === state.selectedTextOverlayId);
+    item.setAttribute('aria-expanded', String(item.dataset.textOverlayListId === state.textEditor?.id));
   });
 }
 
@@ -1110,7 +1112,7 @@ function renderInsertedTextList() {
   els.insertedTextList.innerHTML = overlays.map((overlay) => {
     const summary = textOverlaySummary(overlay);
     return `
-      <div class="inserted-text-item ${overlay.id === state.selectedTextOverlayId ? "active" : ""}" data-text-overlay-list-id="${overlay.id}" data-tooltip="${escapeHtml(summary)}" title="${escapeHtml(summary)}" role="button" tabindex="0">
+      <div class="inserted-text-item ${overlay.id === state.selectedTextOverlayId ? "active" : ""}" data-text-overlay-list-id="${overlay.id}" data-tooltip="${escapeHtml(summary)}" title="${escapeHtml(summary)}" role="button" tabindex="0" aria-haspopup="dialog" aria-controls="textTimingPanel" aria-expanded="${overlay.id === state.textEditor?.id}">
         <div class="inserted-text-title">${escapeHtml(formatInsertMoment(overlay.start))} · 显示 ${(overlay.end - overlay.start).toFixed(1)} 秒</div>
         <div class="inserted-text-content">${escapeHtml(summary)}</div>
       </div>
@@ -1119,10 +1121,13 @@ function renderInsertedTextList() {
 
   els.insertedTextList.querySelectorAll("[data-text-overlay-list-id]").forEach((item) => {
     const select = () => {
+      // Commit the old card's pending time fields before changing selection.
+      closeTextEditor();
       const overlay = currentTextOverlays().find((value) => value.id === item.dataset.textOverlayListId);
       if (!overlay) return;
       normalizeTextOverlay(overlay);
       state.selectedTextOverlayId = overlay.id;
+      state.textEditor = { id: overlay.id, owner: currentTextTarget().owner };
       els.videoPreview.pause();
       if (Number.isFinite(Number(overlay.start))) {
         try {
@@ -1136,7 +1141,13 @@ function renderInsertedTextList() {
       }
       renderTextOverlays();
       renderInsertedTextList();
+      positionTextEditor();
+      els.textOverlayText.focus({ preventScroll: true });
     };
+    item.addEventListener('pointerdown', event => {
+      if (event.button !== 0 || event.pointerType === 'touch') return;
+      event.preventDefault(); select();
+    });
     item.addEventListener("click", select);
     item.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") return;
@@ -1144,6 +1155,10 @@ function renderInsertedTextList() {
       select();
     });
   });
+  if (state.textEditor) {
+    textEditorAnchor()?.scrollIntoView({ block: 'nearest' });
+    requestAnimationFrame(positionTextEditor);
+  }
 }
 
 function voiceDurationText(version) {
@@ -1652,9 +1667,39 @@ function updateSelectedTextStyle() {
   renderTextOverlays();
 }
 
+function textEditorAnchor(id = state.textEditor?.id) {
+  return [...els.insertedTextList.querySelectorAll('[data-text-overlay-list-id]')].find(card => card.dataset.textOverlayListId === id);
+}
+
+function closeTextEditor(restoreFocus = false) {
+  if (!state.textEditor) return;
+  const id = state.textEditor.id;
+  state.textEditor = null;
+  if (els.textTimingPanel.contains(document.activeElement)) document.activeElement.blur();
+  const anchor = textEditorAnchor(id);
+  els.textTimingPanel.hidden = true;
+  syncInsertedTextListSelection();
+  if (restoreFocus) anchor?.focus({ preventScroll: true });
+}
+
+function positionTextEditor() {
+  if (els.textTimingPanel.hidden) return;
+  const anchor = textEditorAnchor();
+  if (!anchor) return;
+  const rect = anchor.getBoundingClientRect(), list = els.insertedTextList.getBoundingClientRect();
+  if (rect.bottom <= list.top || rect.top >= list.bottom) { closeTextEditor(); return; }
+  const panel = els.textTimingPanel, gap = 12, margin = 12;
+  const left = Math.max(margin, Math.min(rect.right + gap, innerWidth - panel.offsetWidth - margin));
+  const top = Math.max(margin, Math.min(rect.top - 12, innerHeight - panel.offsetHeight - margin));
+  panel.style.left = `${left}px`; panel.style.top = `${top}px`;
+  panel.style.setProperty('--arrow-top', `${Math.max(20, Math.min(panel.offsetHeight - 20, rect.top + rect.height / 2 - top))}px`);
+}
+
 function syncTextTimingPanel() {
   const overlay = selectedTextOverlay();
-  els.textTimingPanel.hidden = !overlay;
+  const open = overlay && state.textEditor?.id === overlay.id && state.textEditor.owner === currentTextTarget()?.owner;
+  if (!open) closeTextEditor();
+  els.textTimingPanel.hidden = !open;
   if (!overlay) return;
   normalizeTextOverlay(overlay);
   if (document.activeElement !== els.textOverlayText) els.textOverlayText.value = overlay.text || '';
@@ -1667,6 +1712,7 @@ function syncTextTimingPanel() {
     els.textDuration.max = String(Math.max(0.1, duration - Number(els.textStartTime.value || 0)));
   } else { els.textStartTime.removeAttribute('max'); els.textDuration.removeAttribute('max'); }
   els.textEndTime.textContent = `结束时间 ${overlay.end.toFixed(2)} 秒`;
+  if (open) positionTextEditor();
 }
 
 function updateTextTiming() {
@@ -2823,6 +2869,21 @@ function updateRecordTimer() {
 
 function attachEvents() {
   attachMergePanelResize(document.querySelector('.stage'), $('mergePanelDivider'), renderTextOverlays);
+  $('closeTextEditor').addEventListener('click', () => closeTextEditor(true));
+  document.addEventListener('pointerdown', event => {
+    if (!els.textTimingPanel.contains(event.target) && !event.target.closest('[data-text-overlay-list-id]')) closeTextEditor();
+  }, true);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && state.textEditor && !els.deleteSegmentDialog.open) { event.preventDefault(); closeTextEditor(true); }
+  });
+  document.addEventListener('scroll', positionTextEditor, true);
+  window.addEventListener('resize', positionTextEditor);
+  if (window.parent !== window) {
+    const closeFromParent = () => closeTextEditor();
+    window.parent.document.addEventListener('pointerdown', closeFromParent, true);
+    window.addEventListener('pagehide', () => window.parent.document.removeEventListener('pointerdown', closeFromParent, true), { once: true });
+  }
+  new ResizeObserver(positionTextEditor).observe(els.textTimingPanel);
   attachSortable(els.assetList, { selector: '[data-asset-id]', id: card => card.dataset.assetId, commit: ids => {
     if (!state.project) return;
     const assets = new Map(state.project.assets.map(asset => [asset.id, asset]));
