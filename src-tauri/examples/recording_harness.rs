@@ -43,6 +43,24 @@ fn main() {
         if line == "quit" {
             break;
         }
+        if line.starts_with('{') {
+            let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let result = manager.prepare(
+                serde_json::from_value(value["options"].clone()).unwrap(),
+                PathBuf::from(value["path"].as_str().unwrap()),
+                "integration test".into(),
+                Arc::new(|_| {}),
+            );
+            println!(
+                "{}",
+                match result {
+                    Ok(value) =>
+                        serde_json::json!({"ok":true,"url":value.url,"status":value.status,"reusedController":value.reused_controller}),
+                    Err(error) => serde_json::json!({"ok":false,"error":error}),
+                }
+            );
+            continue;
+        }
         let result = if line == "status" {
             Ok(())
         } else {

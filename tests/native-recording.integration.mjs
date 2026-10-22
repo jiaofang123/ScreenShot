@@ -91,6 +91,12 @@ try{
     }
     if(mode==='region'){await page.locator('#select-region').click();await page.locator('#region-size').getByText(/像素/).waitFor();}
     await page.locator('#choose').click();await waitStatus(url,'recording');
+    if(!results.length){
+      const before=(await config(url)).status;
+      const refused=await command({prepare:true,path:join(directory,'must-not-replace.mp4'),options:{mode:'tab',fps:30,audio:false,originalResolution:false,browser:'chrome'}});
+      assert.equal(refused.ok,false,JSON.stringify(refused));assert.match(refused.error,/正在录屏/);
+      assert.equal((await config(url)).status.id,before.id,'Opening settings must not replace a live native recorder');
+    }
     await page.getByText('录制中',{exact:true}).waitFor();await page.waitForTimeout(1200);
     if(mode==='window'){
       await page.getByRole('button',{name:'暂停',exact:true}).click();await waitStatus(url,'paused');await page.waitForTimeout(600);

@@ -135,6 +135,16 @@ try {
   await page.getByRole('button',{name:'开始录屏',exact:true}).click();await settle();
   assert.equal(await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_recording_session').args.options.resolution),'2k');
   assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.cmd==='plugin:dialog|save').length),0);
+  // Another entry point owns the single backend task. The panel must follow
+  // its lifecycle even after this panel previously started a different task.
+  await page.evaluate(()=>window.statusEvent({id:'other-settings',controllerId:'other-settings',mode:'window',phase:'waiting',message:'请在设置页选择内容',filePath:null,width:0,height:0,elapsedMs:0,bytesWritten:0}));
+  await page.getByRole('heading',{name:'请在录屏设置页选择内容',exact:true}).waitFor();
+  await page.getByRole('button',{name:'取消准备',exact:true}).click();
+  await page.getByRole('button',{name:'开始录屏',exact:true}).waitFor();
+  await page.evaluate(()=>window.statusEvent({id:'new-settings',controllerId:'new-settings',mode:'tab',phase:'error',message:'设置页初始化失败',filePath:null,width:0,height:0,elapsedMs:0,bytesWritten:0}));
+  await page.getByText('设置页初始化失败',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'开始录屏',exact:true}).isEnabled(),true);
+  assert.equal((await importedPaths()).length,3);
   assert.deepEqual(errors, []);
   console.log('PASS: studio opens controller directly, fullscreen retained, no save dialog, project/daily paths, stale/deleted protection, failed/cancelled start, fast completion, continuation ownership, single import');
 } finally { await browser.close(); }

@@ -200,7 +200,7 @@ pub fn run() {
             let mut tray = TrayIconBuilder::new()
                 .menu(&menu)
                 .tooltip("ScreenShot · Ctrl/Cmd + Shift + X")
-                .show_menu_on_left_click(false)
+                .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "capture" => {
                         let app = app.clone();

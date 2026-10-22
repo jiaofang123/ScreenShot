@@ -1,7 +1,7 @@
 const $ = id => document.getElementById(id);
 const base = new URL('./', location.href);
 const names = { window: '应用窗口', tab: '浏览器页签', desktop: '电脑桌面', region: '框选区域' };
-const phases = { waiting: '等待选择', selecting: '调整选区', countdown: '准备录制', recording: '录制中', paused: '已暂停', saving: '保存中', saved: '已保存', cancelled: '已取消', error: '录制出错' };
+const phases = { waiting: '等待选择', selecting: '调整选区', countdown: '准备录制', starting: '正在启动', recording: '录制中', paused: '已暂停', saving: '保存中', saved: '已保存', cancelled: '已取消', error: '录制出错' };
 let config, socket, sourceStream, outputStream, recorder, cropWorker;
 let phase = 'waiting', startedAt = 0, endedAt = 0, pauseStarted = 0, pausedMs = 0, lastFlush = 0, nextSequence = 0, pendingBytes = 0;
 let uploadQueue = Promise.resolve(), uploadError = null, finishing = false, cancelled = false, stopRequested = false;
@@ -370,7 +370,7 @@ try {
   if (!config.status || !['waiting','saved','cancelled','error'].includes(config.status.phase)) throw new Error('录屏已在其他页面开始，请使用原录屏页面。');
   $('mode').value = config.options.mode; $('fps').value = String(config.options.fps); $('quality').value = config.options.resolution || (config.options.originalResolution ? '4k' : '1080p'); $('audio').checked = config.options.audio;
   navigator.mediaDevices?.setCaptureHandleConfig?.({ handle: 'screenshot-recorder', permittedOrigins: ['*'] });
-  await refreshNativeSources();
+  preparing = true;
   socket = new WebSocket(config.webSocketUrl);
   socket.onopen = () => { window.focus(); setPhase(config.status.phase); notice(''); if(config.status.phase === 'saved') showSaved(config.status.filePath); };
   socket.onmessage = ({ data }) => {
@@ -392,4 +392,10 @@ try {
     if (recorder?.state && recorder.state !== 'inactive') recorder.stop();
     else { cleanup(); setPhase('error'); notice(uploadError.message); }
   };
-} catch (error) { setPhase('error'); notice(error.message || String(error)); }
+  await refreshNativeSources();
+  preparing = false; setPhase(phase);
+} catch (error) {
+  preparing = false;
+  if (config?.status?.phase === 'waiting') await reportError(error);
+  else { setPhase('error'); notice(error.message || String(error)); }
+}

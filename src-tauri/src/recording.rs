@@ -105,6 +105,35 @@ struct Session {
 }
 
 impl Session {
+    fn retire_for_replacement(&self, replacement_url: Option<String>) -> Result<(), String> {
+        // Share the status lock with the start transition: replacing an unused
+        // settings page must never race a browser/native recording starting.
+        let status = self.status.lock();
+        if status.active()
+            && (!matches!(status.phase.as_str(), "waiting" | "selecting")
+                || self.native_running.load(Ordering::Acquire)
+                || status.bytes_written > 0)
+        {
+            return Err(if status.phase == "saving" {
+                "录屏正在保存，请等待保存完成后再开始".into()
+            } else {
+                "正在录屏，请先通过 ScreenShot 菜单“停止录屏并保存”结束当前录制".into()
+            });
+        }
+        if status.active()
+            && !self.connected.load(Ordering::Acquire)
+            && self
+                .browser_launch
+                .lock()
+                .is_some_and(|time| time.elapsed() < Duration::from_secs(15))
+        {
+            return Err("录屏设置页正在打开，请稍候再试".into());
+        }
+        *self.replacement_url.lock() = replacement_url;
+        self.shutdown.store(true, Ordering::Release);
+        Ok(())
+    }
+
     fn update(&self, change: impl FnOnce(&mut RecordingStatus)) {
         let snapshot = {
             let mut status = self.status.lock();
@@ -200,12 +229,6 @@ impl RecordingManager {
             return Err("单页签请使用浏览器授权录制".into());
         }
         let mut current = self.current.lock();
-        if current
-            .as_ref()
-            .is_some_and(|session| session.status.lock().active())
-        {
-            return Err("已有录屏任务，请先停止".into());
-        }
         let status = RecordingStatus {
             id: Uuid::new_v4().to_string(),
             controller_id: None,
@@ -253,9 +276,10 @@ impl RecordingManager {
             url: String::new(),
             sink,
         });
-        if let Some(previous) = current.replace(session.clone()) {
-            previous.shutdown.store(true, Ordering::Release);
+        if let Some(previous) = current.as_ref() {
+            previous.retire_for_replacement(None)?;
         }
+        current.replace(session.clone());
         drop(current);
         (session.sink)(status.clone());
         if let Err(error) = launch_native(app.clone(), session.clone(), source, path) {
@@ -320,12 +344,6 @@ impl RecordingManager {
             return Err("视频保存路径不能是文件夹".into());
         }
         let mut current = self.current.lock();
-        if current
-            .as_ref()
-            .is_some_and(|session| session.status.lock().active())
-        {
-            return Err("已有录屏任务，请先停止并等待保存完成".into());
-        }
         let server = Server::http(("127.0.0.1", 0))
             .map_err(|error| format!("无法创建本机录屏连接：{error}"))?;
         let port = server
@@ -378,19 +396,19 @@ impl RecordingManager {
             sink,
         });
         let mut reused_controller = false;
-        if let Some(previous) = current.replace(session.clone()) {
-            // A completed controller can navigate to a new session in its existing
+        if let Some(previous) = current.as_ref() {
+            // A completed or unused controller can navigate in its existing
             // window, including when the project/destination has changed.
             reused_controller = previous.connected.load(Ordering::Acquire)
                 && !previous.shutdown.load(Ordering::Acquire)
                 && !previous.url.is_empty()
                 && previous.status.lock().browser == status.browser;
+            previous.retire_for_replacement(reused_controller.then(|| session.url.clone()))?;
             if reused_controller {
-                *previous.replacement_url.lock() = Some(session.url.clone());
                 *session.browser_launch.lock() = Some(Instant::now());
             }
-            previous.shutdown.store(true, Ordering::Release);
         }
+        current.replace(session.clone());
         drop(current);
         let ws_session = session.clone();
         let ws_origin = origin.clone();
@@ -565,6 +583,12 @@ fn websocket_worker(listener: TcpListener, session: Arc<Session>, origin: String
         while !session.shutdown.load(Ordering::Acquire) {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    // macOS inherits O_NONBLOCK from the listener on accept.
+                    // A read timeout alone does not undo it and would busy-spin
+                    // for the entire time the settings page is open.
+                    if stream.set_nonblocking(false).is_err() {
+                        continue;
+                    }
                     let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
                     let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
                     let result = tungstenite::accept_hdr(
@@ -624,11 +648,15 @@ fn websocket_worker(listener: TcpListener, session: Arc<Session>, origin: String
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) => {}
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(10))
+                }
                 Err(_) => break,
             }
         }
-        if let Some(url) = session.replacement_url.lock().as_ref() {
+        let replacement_url = session.replacement_url.lock().clone();
+        if let Some(url) = replacement_url {
             let _ = socket.send(Message::Text(
                 serde_json::json!({"controllerUrl":url}).to_string().into(),
             ));
@@ -808,7 +836,11 @@ fn recording_server(
         {
             fail_session(&session, &mut output, "录屏页面未能及时停止");
         }
-        if session.status.lock().phase == "waiting"
+        let idle = matches!(
+            session.status.lock().phase.as_str(),
+            "waiting" | "selecting"
+        ) && output.mime.is_none();
+        if idle
             && !session.native_running.load(Ordering::Acquire)
             && ((created.elapsed() > Duration::from_secs(600)
                 && !session.connected.load(Ordering::Acquire))
@@ -1093,17 +1125,17 @@ fn handle_request(
         "begin" => {
             let data: BeginRequest = serde_json::from_slice(&body(&mut request, 64 * 1024)?)
                 .map_err(|error| error.to_string())?;
-            if session.desired.load(Ordering::Acquire) >= STOP {
-                return Err("录屏已取消".into());
-            }
-            if app.is_some()
-                && cfg!(target_os = "macos")
-                && session.status.lock().mode != RecordingMode::Tab
-            {
-                return Err("窗口和屏幕请使用排除工具界面的原生录制".into());
-            }
-            output.begin(&data, session.status.lock().mode)?;
-            session.update(|status| {
+            let snapshot = {
+                let mut status = session.status.lock();
+                if session.shutdown.load(Ordering::Acquire)
+                    || session.desired.load(Ordering::Acquire) >= STOP
+                {
+                    return Err("录屏设置已更新或取消，请使用当前设置页".into());
+                }
+                if app.is_some() && cfg!(target_os = "macos") && status.mode != RecordingMode::Tab {
+                    return Err("窗口和屏幕请使用排除工具界面的原生录制".into());
+                }
+                output.begin(&data, status.mode)?;
                 status.phase = "recording".into();
                 status.message = "录屏进行中，可切换回目标应用".into();
                 status.width = data.width;
@@ -1111,7 +1143,9 @@ fn handle_request(
                 status.has_audio = data.has_audio;
                 status.source_name = data.source_name.chars().take(300).collect();
                 status.file_path = Some(output.destination.to_string_lossy().into());
-            });
+                status.clone()
+            };
+            (session.sink)(snapshot);
             Ok(serde_json::json!({"path":output.destination}))
         }
         "selecting" => {
@@ -1221,6 +1255,37 @@ fn next_recording_path(base: &Path) -> PathBuf {
 }
 
 fn launch_native(
+    app: AppHandle,
+    session: Arc<Session>,
+    source: serde_json::Value,
+    path: PathBuf,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut status = session.status.lock();
+        if session.shutdown.load(Ordering::Acquire)
+            || session.desired.load(Ordering::Acquire) >= STOP
+            || !matches!(status.phase.as_str(), "waiting" | "selecting")
+        {
+            return Err("录屏设置已更新或取消，请使用当前设置页".into());
+        }
+        status.phase = "starting".into();
+        status.message = "正在启动本机录屏…".into();
+        status.clone()
+    };
+    (session.sink)(snapshot);
+    let result = launch_native_process(app, session.clone(), source, path);
+    if let Err(error) = &result {
+        if !session.native_running.load(Ordering::Acquire) {
+            session.update(|status| {
+                status.phase = "error".into();
+                status.message = error.clone();
+            });
+        }
+    }
+    result
+}
+
+fn launch_native_process(
     app: AppHandle,
     session: Arc<Session>,
     source: serde_json::Value,
@@ -1896,6 +1961,8 @@ mod tests {
             None
         )
         .starts_with("HTTP/1.1 404"));
+        let session = manager.current.lock().clone().unwrap();
+        session.update(|status| status.phase = "recording".into());
         assert!(manager
             .prepare(
                 options(RecordingMode::Desktop),
@@ -1905,6 +1972,159 @@ mod tests {
             )
             .is_err());
         manager.control("cancel").unwrap();
+    }
+
+    fn controller(
+        prepared: &PreparedRecording,
+    ) -> tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>> {
+        use tungstenite::client::IntoClientRequest;
+        let path = format!("/{}config", prepared.url.splitn(4, '/').nth(3).unwrap());
+        let response = http(&prepared.url, "GET", &path, None, None);
+        let config: serde_json::Value =
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
+        let origin = prepared
+            .url
+            .trim_end_matches('/')
+            .rsplit_once('/')
+            .unwrap()
+            .0;
+        let mut request = config["webSocketUrl"]
+            .as_str()
+            .unwrap()
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Origin", origin.parse().unwrap());
+        let (mut socket, _) = tungstenite::connect(request).unwrap();
+        if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+        }
+        // Receiving the initial snapshot confirms the server owns the connection.
+        assert!(matches!(socket.read().unwrap(), Message::Text(_)));
+        socket
+    }
+
+    fn wait_terminal(manager: &RecordingManager) {
+        let since = Instant::now();
+        while manager.is_active() {
+            assert!(
+                since.elapsed() < Duration::from_secs(2),
+                "idle session did not end promptly"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn unused_settings_can_be_replaced_in_the_same_controller_window() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = RecordingManager::default();
+        let first = manager
+            .prepare(
+                options(RecordingMode::Window),
+                directory.path().join("first.mp4"),
+                "Test".into(),
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        let mut socket = controller(&first);
+        let second = manager
+            .prepare(
+                options(RecordingMode::Tab),
+                directory.path().join("second.mp4"),
+                "Test".into(),
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        assert!(second.reused_controller);
+        assert_ne!(first.status.id, second.status.id);
+        assert_eq!(manager.status().unwrap().id, second.status.id);
+        loop {
+            if let Message::Text(message) = socket.read().unwrap() {
+                let value: serde_json::Value = serde_json::from_str(&message).unwrap();
+                if let Some(url) = value["controllerUrl"].as_str() {
+                    assert_eq!(url, second.url);
+                    break;
+                }
+            }
+        }
+        let _ = socket.close(None);
+        manager.control("stop").unwrap();
+        wait_terminal(&manager);
+        assert_eq!(manager.status().unwrap().phase, "cancelled");
+        assert!(!directory.path().join("first.mp4").exists());
+        assert!(!directory.path().join("second.mp4").exists());
+    }
+
+    #[test]
+    fn closing_unused_controller_releases_task_and_cancelling_selection_is_prompt() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = RecordingManager::default();
+        let first = manager
+            .prepare(
+                options(RecordingMode::Window),
+                directory.path().join("first.mp4"),
+                "Test".into(),
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        controller(&first).close(None).unwrap();
+        wait_terminal(&manager);
+        manager
+            .prepare(
+                options(RecordingMode::Region),
+                directory.path().join("second.mp4"),
+                "Test".into(),
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        manager
+            .current
+            .lock()
+            .as_ref()
+            .unwrap()
+            .update(|s| s.phase = "selecting".into());
+        manager.control("stop").unwrap();
+        wait_terminal(&manager);
+        assert_eq!(manager.status().unwrap().phase, "cancelled");
+    }
+
+    #[test]
+    fn replacement_preserves_recording_and_saving_sessions() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = RecordingManager::default();
+        let first = manager
+            .prepare(
+                options(RecordingMode::Desktop),
+                directory.path().join("first.mp4"),
+                "Test".into(),
+                Arc::new(|_| {}),
+            )
+            .unwrap();
+        let session = manager.current.lock().clone().unwrap();
+        for phase in ["starting", "recording", "paused", "saving"] {
+            session.update(|s| s.phase = phase.into());
+            assert!(manager
+                .prepare(
+                    options(RecordingMode::Tab),
+                    directory.path().join("second.mp4"),
+                    "Test".into(),
+                    Arc::new(|_| {})
+                )
+                .is_err());
+            assert_eq!(manager.status().unwrap().id, first.status.id);
+            assert!(!session.shutdown.load(Ordering::Acquire));
+        }
+        // A helper may be finishing while its status still says waiting.
+        session.update(|s| s.phase = "waiting".into());
+        session.native_running.store(true, Ordering::Release);
+        assert!(session.retire_for_replacement(None).is_err());
+        session.native_running.store(false, Ordering::Release);
+        manager.control("stop").unwrap();
+        wait_terminal(&manager);
     }
 
     #[test]
