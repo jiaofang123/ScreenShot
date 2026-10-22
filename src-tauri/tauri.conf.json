@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.amamda.screenshot",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run media:prepare && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run media:prepare && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -23,6 +23,10 @@
       }
     ],
     "security": {
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      },
       "csp": null
     }
   },
@@ -30,11 +34,16 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
-    "shortDescription": "快速框选、滚动长截图和标注",
-    "longDescription": "跨平台桌面截图工具，支持框选、手动滚动长截图、标注、打码和自动复制。",
+    "resources": {
+      "resources/runtime/": "runtime/",
+      "resources/studio/": "studio/"
+    },
+    "shortDescription": "截图、录屏与视频旁白制作",
+    "longDescription": "桌面截图与演示视频制作工具，支持截图标注、滚动长截图、原生窗口与区域录屏、视频文字稿、中文旁白、音视频合成和批量合并导出。",
     "macOS": {
       "minimumSystemVersion": "12.3",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
     },
     "icon": [
       "icons/32x32.png",

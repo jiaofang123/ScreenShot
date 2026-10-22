@@ -1,0 +1,163 @@
+//! Explicit opt-in macOS hardware test. Runs the production manager and native
+//! capture helper with a hidden Tauri window and the real browser controller.
+use std::{
+    io::{self, BufRead},
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tauri::Manager;
+
+#[path = "../src/app_window.rs"]
+mod app_window;
+#[path = "../src/image_utils.rs"]
+#[allow(dead_code)]
+mod image_utils;
+#[path = "../src/recording.rs"]
+#[allow(dead_code)]
+mod recording;
+#[path = "../src/studio.rs"]
+#[allow(dead_code)]
+mod studio_impl;
+mod studio {
+    pub use crate::studio_impl::*;
+    pub fn resource(app: &tauri::AppHandle, name: &str) -> std::path::PathBuf {
+        if name == "runtime/screenshot-recorder" {
+            if let Some(path) = std::env::var_os("SCREENSHOT_QA_HELPER") {
+                return path.into();
+            }
+        }
+        crate::studio_impl::resource(app, name)
+    }
+}
+mod capture {
+    pub fn show_main_window(app: &tauri::AppHandle) {
+        crate::app_window::show_main_window(app);
+    }
+    // The live test supplies a known rectangle inside its own fixture window.
+    // Overlay pointer handling is exercised by recording-region.ui.mjs.
+    pub async fn select_recording_region(
+        _: tauri::AppHandle,
+        _: u32,
+        _: Option<bool>,
+    ) -> Result<Option<serde_json::Value>, String> {
+        Ok(Some(
+            serde_json::json!({"crop":{"x":0.15,"y":0.2,"width":0.6,"height":0.6},"width":1075,"height":672}),
+        ))
+    }
+}
+
+fn main() {
+    assert_eq!(
+        std::env::var("SCREENSHOT_REAL_CAPTURE").as_deref(),
+        Ok("1"),
+        "Set SCREENSHOT_REAL_CAPTURE=1 to run the real screen test"
+    );
+    let destination = PathBuf::from(std::env::args().nth(1).expect("output path"));
+    let mut context = tauri::generate_context!();
+    for window in &mut context.config_mut().app.windows {
+        window.visible = false;
+    }
+    tauri::Builder::default()
+        .manage(recording::RecordingManager::default())
+        .setup(move |app| {
+            tauri::WebviewWindowBuilder::new(app,"native-qa-exclusion",tauri::WebviewUrl::External("about:blank".parse().unwrap()))
+                .initialization_script("document.addEventListener('DOMContentLoaded',()=>{document.documentElement.style.background='#ff0055';});").title("ScreenShot QA Exclusion").inner_size(300.0,260.0).position(400.0,400.0)
+                .decorations(false).always_on_top(true).skip_taskbar(true).focused(false).build()?;
+            let app = app.handle().clone();
+            std::thread::spawn(move || {
+                let manager = app.state::<recording::RecordingManager>();
+                let prepared = manager
+                    .prepare_with_app(
+                        recording::RecordingOptions {
+                            mode: recording::RecordingMode::Window,
+                            fps: 30,
+                            audio: true,
+                            original_resolution: false,
+                            resolution: None,
+                            browser: Some("chrome".into()),
+                        },
+                        destination,
+                        "Google Chrome".into(),
+                        Arc::new(|_| {}),
+                        Some(app.clone()),
+                    )
+                    .unwrap();
+                println!(
+                    "{}",
+                    serde_json::json!({"url":prepared.url,"status":prepared.status})
+                );
+                for line in io::stdin().lock().lines().map_while(Result::ok) {
+                    if line == "quit" {
+                        break;
+                    }
+                    let result = if line.starts_with('{') {
+                        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+                        if let Some(destination) = value.get("destination") {
+                            recording::default_recording_path(app.clone(), destination["projectRoot"].as_str().map(str::to_owned), destination["date"].as_str().unwrap().into())
+                                .map(|path| serde_json::json!({"path":path}))
+                        } else if value["prepare"] == true {
+                            manager.prepare_with_app(
+                                serde_json::from_value(value["options"].clone()).unwrap(),
+                                PathBuf::from(value["path"].as_str().unwrap()),
+                                "Google Chrome".into(), Arc::new(|_| {}), Some(app.clone()),
+                            ).map(|value| serde_json::json!({"url":value.url,"status":value.status,"reusedController":value.reused_controller}))
+                        } else if value["openController"] == true {
+                            let profile = std::env::var("SCREENSHOT_QA_CHROME_PROFILE").unwrap();
+                            recording::open_recording_session(app.clone(), serde_json::from_value(value["options"].clone()).unwrap(), value["path"].as_str().unwrap().into(), move |url, _| {
+                                let status = std::process::Command::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome").arg(format!("--user-data-dir={profile}")).arg(format!("--app={url}")).status().map_err(|e| e.to_string())?;
+                                if status.success() { Ok(()) } else { Err("QA Chrome did not launch".into()) }
+                            })
+                                .map(|value| serde_json::json!({"status":value}))
+                        } else { manager
+                            .start_native(
+                                app.clone(),
+                                serde_json::from_value(value["options"].clone()).unwrap(),
+                                value["source"].clone(),
+                                PathBuf::from(value["path"].as_str().unwrap()),
+                            )
+                            .map(|status| serde_json::json!(status)) }
+                    } else if matches!(line.as_str(), "window-state" | "hide-main" | "reopen-main" | "fullscreen-main" | "normal-main") {
+                        let window = app.get_webview_window("main").unwrap();
+                        if line == "hide-main" { let _ = window.hide(); }
+                        if line == "reopen-main" { crate::app_window::show_main_window(&app); }
+                        if line == "fullscreen-main" { let _ = window.set_fullscreen(true); crate::app_window::show_main_window(&app); }
+                        if line == "normal-main" { let _ = window.set_fullscreen(false); }
+                        let windows = xcap::Window::all().unwrap_or_default();
+                        let active = windows.iter().any(|w| w.pid().ok() == Some(std::process::id()) && w.is_focused().unwrap_or(false));
+                        let controller_title = std::env::var("SCREENSHOT_QA_CONTROLLER_TITLE").unwrap_or_else(|_| "ScreenShot · 本机录屏".into());
+                        let controller_focused = windows.iter().any(|w| w.title().unwrap_or_default().contains(&controller_title) && w.is_focused().unwrap_or(false));
+                        let controllers = windows.iter().filter(|w| w.title().unwrap_or_default().contains("ScreenShot · 本机录屏")).map(|w| serde_json::json!({"title":w.title().ok(),"pid":w.pid().ok(),"active":w.is_focused().ok()})).collect::<Vec<_>>();
+                        Ok(serde_json::json!({"visible":window.is_visible().unwrap(),"minimized":window.is_minimized().unwrap(),"focused":window.is_focused().unwrap(),"fullscreen":window.is_fullscreen().unwrap(),"appActive":active,"controllerFocused":controller_focused,"controllers":controllers}))
+                    } else {
+                        manager
+                            .control(&line)
+                            .map(|_| serde_json::json!(manager.status()))
+                    };
+                    println!(
+                        "{}",
+                        match result {
+                            Ok(status) => serde_json::json!({"ok":true,"status":status}),
+                            Err(error) => serde_json::json!({"ok":false,"error":error}),
+                        }
+                    );
+                }
+                let _ = manager.control("stop");
+                let since = Instant::now();
+                while manager.is_active() && since.elapsed() < Duration::from_secs(15) {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                app.exit(0);
+            });
+            Ok(())
+        })
+        .build(context)
+        .expect("native capture test application")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                app_window::show_main_window(app);
+                println!("{}", serde_json::json!({"dockReopened":true}));
+            }
+        });
+}

@@ -1,5 +1,6 @@
 use image::{Rgba, RgbaImage};
 use serde::Deserialize;
+use std::borrow::Cow;
 
 use crate::image_utils::{data_url_to_image, image_to_data_url};
 
@@ -43,6 +44,14 @@ pub enum Annotation {
         #[serde(default = "default_mosaic_block_size", alias = "blockSize")]
         block_size: u32,
     },
+    // The webview renders a small transparent PNG using its system fonts, so
+    // Chinese text looks identical in the preview and the exported image.
+    Text {
+        x: f32,
+        y: f32,
+        #[serde(alias = "dataUrl")]
+        data_url: String,
+    },
 }
 
 fn default_mosaic_block_size() -> u32 {
@@ -58,14 +67,26 @@ pub fn render_annotations(
     source_data_url: String,
     annotations: Vec<Annotation>,
 ) -> Result<String, String> {
-    let mut image = data_url_to_image(&source_data_url)?;
-    for annotation in annotations {
-        apply_annotation(&mut image, annotation);
-    }
-    image_to_data_url(&image)
+    let image = data_url_to_image(&source_data_url)?;
+    let rendered = render_image(&image, annotations)?;
+    image_to_data_url(&rendered)
 }
 
-fn apply_annotation(image: &mut RgbaImage, annotation: Annotation) {
+pub fn render_image(
+    image: &RgbaImage,
+    annotations: Vec<Annotation>,
+) -> Result<Cow<'_, RgbaImage>, String> {
+    if annotations.is_empty() {
+        return Ok(Cow::Borrowed(image));
+    }
+    let mut image = image.clone();
+    for annotation in annotations {
+        apply_annotation(&mut image, annotation)?;
+    }
+    Ok(Cow::Owned(image))
+}
+
+fn apply_annotation(image: &mut RgbaImage, annotation: Annotation) -> Result<(), String> {
     match annotation {
         Annotation::Rect {
             x,
@@ -138,6 +159,48 @@ fn apply_annotation(image: &mut RgbaImage, annotation: Annotation) {
             height,
             block_size,
         } => pixelate(image, x, y, width, height, block_size.max(4)),
+        Annotation::Text { x, y, data_url } => {
+            if !x.is_finite() || !y.is_finite() {
+                return Err("无效的文字位置".to_string());
+            }
+            let text_image = data_url_to_image(&data_url)
+                .map_err(|error| format!("文字图片解码失败：{error}"))?;
+            overlay_text(image, &text_image, x.round() as i64, y.round() as i64);
+        }
+    }
+    Ok(())
+}
+
+fn overlay_text(image: &mut RgbaImage, text: &RgbaImage, x: i64, y: i64) {
+    let left = x.clamp(0, i64::from(image.width()));
+    let top = y.clamp(0, i64::from(image.height()));
+    let right = x
+        .saturating_add(i64::from(text.width()))
+        .clamp(0, i64::from(image.width()));
+    let bottom = y
+        .saturating_add(i64::from(text.height()))
+        .clamp(0, i64::from(image.height()));
+    for target_y in top..bottom {
+        for target_x in left..right {
+            let foreground = text
+                .get_pixel((target_x - x) as u32, (target_y - y) as u32)
+                .0;
+            let source_alpha = u32::from(foreground[3]);
+            if source_alpha == 0 {
+                continue;
+            }
+            let background = image.get_pixel_mut(target_x as u32, target_y as u32);
+            let remaining_alpha = u32::from(background[3]) * (255 - source_alpha);
+            let alpha = source_alpha * 255 + remaining_alpha;
+            // Integer source-over blending keeps opaque screenshots opaque;
+            // float rounding must not introduce alpha=254 at glyph edges.
+            for channel in 0..3 {
+                let value = u32::from(foreground[channel]) * source_alpha * 255
+                    + u32::from(background[channel]) * remaining_alpha;
+                background[channel] = ((value + alpha / 2) / alpha) as u8;
+            }
+            background[3] = ((alpha + 127) / 255) as u8;
+        }
     }
 }
 
@@ -238,4 +301,104 @@ fn parse_color(value: &str) -> Rgba<u8> {
         }
     }
     Rgba([239, 68, 68, 255])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unannotated_copy_borrows_pixels_and_annotations_preserve_source() {
+        let source = RgbaImage::from_pixel(6, 6, Rgba([255, 255, 255, 255]));
+        assert!(matches!(
+            render_image(&source, vec![]).unwrap(),
+            Cow::Borrowed(_)
+        ));
+        let rendered = render_image(&source, vec![text_annotation(1.0, 1.0)]).unwrap();
+        assert!(matches!(rendered, Cow::Owned(_)));
+        assert_eq!(*rendered.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(*source.get_pixel(1, 1), Rgba([255, 255, 255, 255]));
+    }
+
+    fn text_annotation(x: f32, y: f32) -> Annotation {
+        let mut text = RgbaImage::new(3, 3);
+        text.put_pixel(0, 0, Rgba([255, 0, 0, 255]));
+        text.put_pixel(1, 1, Rgba([255, 0, 0, 128]));
+        Annotation::Text {
+            x,
+            y,
+            data_url: image_to_data_url(&text).unwrap(),
+        }
+    }
+
+    #[test]
+    fn exports_text_at_its_position_with_transparency() {
+        let source = RgbaImage::from_pixel(6, 6, Rgba([255, 255, 255, 255]));
+        let output = render_annotations(
+            image_to_data_url(&source).unwrap(),
+            vec![text_annotation(2.0, 1.0)],
+        )
+        .unwrap();
+        let output = data_url_to_image(&output).unwrap();
+        assert_eq!(output.dimensions(), (6, 6));
+        assert_eq!(*output.get_pixel(2, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(*output.get_pixel(3, 2), Rgba([255, 127, 127, 255]));
+        assert_eq!(*output.get_pixel(4, 3), Rgba([255, 255, 255, 255]));
+        assert_eq!(*output.get_pixel(0, 0), Rgba([255, 255, 255, 255]));
+    }
+
+    #[test]
+    fn clips_text_at_image_edges() {
+        let mut image = RgbaImage::from_pixel(2, 2, Rgba([255, 255, 255, 255]));
+        apply_annotation(&mut image, text_annotation(-1.0, -1.0)).unwrap();
+        assert_eq!(*image.get_pixel(0, 0), Rgba([255, 127, 127, 255]));
+        apply_annotation(&mut image, text_annotation(1.0, 1.0)).unwrap();
+        assert_eq!(*image.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(image.dimensions(), (2, 2));
+    }
+
+    #[test]
+    fn preserves_alpha_on_transparent_backgrounds() {
+        let mut image = RgbaImage::new(4, 4);
+        apply_annotation(&mut image, text_annotation(0.0, 0.0)).unwrap();
+        assert_eq!(*image.get_pixel(0, 0), Rgba([255, 0, 0, 255]));
+        assert_eq!(*image.get_pixel(1, 1), Rgba([255, 0, 0, 128]));
+        assert_eq!(*image.get_pixel(2, 2), Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn text_and_shapes_follow_annotation_order() {
+        let mut image = RgbaImage::from_pixel(6, 6, Rgba([255, 255, 255, 255]));
+        apply_annotation(&mut image, text_annotation(1.0, 1.0)).unwrap();
+        apply_annotation(
+            &mut image,
+            Annotation::Rect {
+                x: 1.0,
+                y: 1.0,
+                width: 3.0,
+                height: 3.0,
+                color: "#0000ff".into(),
+                stroke_width: 1.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(*image.get_pixel(1, 1), Rgba([0, 0, 255, 255]));
+        apply_annotation(&mut image, text_annotation(1.0, 1.0)).unwrap();
+        assert_eq!(*image.get_pixel(1, 1), Rgba([255, 0, 0, 255]));
+    }
+
+    #[test]
+    fn rejects_invalid_text_images_and_positions() {
+        let mut image = RgbaImage::new(6, 6);
+        assert!(apply_annotation(
+            &mut image,
+            Annotation::Text {
+                x: 0.0,
+                y: 0.0,
+                data_url: "invalid".into()
+            },
+        )
+        .is_err());
+        assert!(apply_annotation(&mut image, text_annotation(f32::NAN, 0.0)).is_err());
+    }
 }

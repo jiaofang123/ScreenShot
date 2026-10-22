@@ -12,7 +12,9 @@ import type {
   CapturePayload,
   EditorTool,
   Point,
+  TextDraft,
 } from "../types";
+import { createTextAnnotation, TEXT_FONT_FAMILY, TEXT_LINE_HEIGHT } from "../textAnnotations";
 
 interface Props {
   capture: CapturePayload;
@@ -48,9 +50,12 @@ function normalizedRect(annotation: {
 
 function AnnotationEditor({ capture, onClose, onNotify }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const textInputRef = useRef<HTMLTextAreaElement>(null);
   const [tool, setTool] = useState<EditorTool>("arrow");
   const [color, setColor] = useState("#ff4d5e");
   const [strokeWidth, setStrokeWidth] = useState(5);
+  const [fontSize, setFontSize] = useState(28);
+  const [textDraft, setTextDraft] = useState<TextDraft | null>(null);
   const [annotations, setAnnotations] = useState<Annotation[]>([]);
   const [redoStack, setRedoStack] = useState<Annotation[]>([]);
   const [draft, setDraft] = useState<Annotation | null>(null);
@@ -68,12 +73,17 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
     setAnnotations([]);
     setRedoStack([]);
     setDraft(null);
+    setTextDraft(null);
     setDrawing(false);
     setPanning(false);
     setSpacePressed(false);
     setProcessing(false);
     setInitialized(false);
-  }, [capture.dataUrl]);
+  }, [capture.captureId]);
+
+  useEffect(() => {
+    if (textDraft) textInputRef.current?.focus();
+  }, [textDraft?.x, textDraft?.y]);
 
   const fitWidth = useCallback(() => {
     const viewport = viewportRef.current;
@@ -121,6 +131,11 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
 
   useEffect(() => {
     const down = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      const typing = event.target instanceof HTMLElement &&
+        (event.target.matches("input, textarea, select") || event.target.isContentEditable);
+      if (typing && !((event.ctrlKey || event.metaKey) &&
+          (event.key === "Enter" || event.key.toLowerCase() === "s"))) return;
       if (event.code === "Space") {
         setSpacePressed(true);
         event.preventDefault();
@@ -188,6 +203,20 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
     }
     if (event.button !== 0) return;
     const point = imagePoint(event);
+    if (tool === "text") {
+      const cursor = viewportPoint(event);
+      const x = (cursor.x - pan.x) / zoom;
+      const y = (cursor.y - pan.y) / zoom;
+      if (x < 0 || y < 0 || x >= capture.width || y >= capture.height) return;
+      event.preventDefault();
+      try {
+        commitText();
+        setTextDraft({ x: Math.floor(point.x), y: Math.floor(point.y), text: "", color, fontSize });
+      } catch (error) {
+        onNotify(String(error));
+      }
+      return;
+    }
     pointerStartRef.current = point;
     setDrawing(true);
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -267,6 +296,7 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
   }
 
   function isMeaningful(annotation: Annotation) {
+    if (annotation.type === "text") return Boolean(annotation.text.trim());
     if (annotation.type === "pen") return annotation.points.length > 1;
     if (annotation.type === "arrow") {
       return Math.hypot(
@@ -278,25 +308,60 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
   }
 
   function undo() {
-    setAnnotations((items) => {
-      const last = items[items.length - 1];
-      if (!last) return items;
-      setRedoStack((redoItems) => [...redoItems, last]);
-      return items.slice(0, -1);
-    });
+    if (textDraft) {
+      setTextDraft(null);
+      return;
+    }
+    const last = annotations[annotations.length - 1];
+    if (!last) return;
+    setRedoStack((items) => [...items, last]);
+    setAnnotations(annotations.slice(0, -1));
   }
 
   function redo() {
-    setRedoStack((items) => {
-      const last = items[items.length - 1];
-      if (!last) return items;
-      setAnnotations((annotationItems) => [...annotationItems, last]);
-      return items.slice(0, -1);
-    });
+    if (textDraft) return;
+    const last = redoStack[redoStack.length - 1];
+    if (!last) return;
+    setAnnotations((items) => [...items, last]);
+    setRedoStack(redoStack.slice(0, -1));
   }
 
-  async function renderCurrent() {
-    const renderAnnotations = annotations.map((annotation) => {
+  function commitText(): Annotation[] {
+    if (!textDraft) return annotations;
+    const annotation = createTextAnnotation(textDraft, capture.width, capture.height);
+    const next = annotation ? [...annotations, annotation] : annotations;
+    if (annotation) {
+      setAnnotations(next);
+      setRedoStack([]);
+    }
+    setTextDraft(null);
+    return next;
+  }
+
+  function selectTool(nextTool: EditorTool) {
+    try {
+      commitText();
+      setTool(nextTool);
+    } catch (error) {
+      onNotify(String(error));
+    }
+  }
+
+  function updateTextColor(nextColor: string) {
+    setColor(nextColor);
+    setTextDraft((current) => current ? { ...current, color: nextColor } : null);
+  }
+
+  function updateFontSize(nextSize: number) {
+    setFontSize(nextSize);
+    setTextDraft((current) => current ? { ...current, fontSize: nextSize } : null);
+  }
+
+  function serializeAnnotations(current: Annotation[]) {
+    return current.map((annotation) => {
+      if (annotation.type === "text") {
+        return { type: "text", x: annotation.x, y: annotation.y, data_url: annotation.dataUrl };
+      }
       if (annotation.type === "rect") {
         const { strokeWidth, ...rest } = annotation;
         return { ...rest, stroke_width: strokeWidth };
@@ -312,19 +377,17 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
       const { blockSize, ...rest } = annotation;
       return { ...rest, block_size: blockSize };
     });
-
-    return invoke<string>("render_annotations", {
-      sourceDataUrl: capture.dataUrl,
-      annotations: renderAnnotations,
-    });
   }
 
   async function completeAndCopy() {
+    if (processing) return;
     setProcessing(true);
     onNotify("正在渲染并复制图片…");
     try {
-      const output = await renderCurrent();
-      await invoke("copy_png_to_clipboard", { dataUrl: output });
+      await invoke("copy_capture_to_clipboard", {
+        captureId: capture.captureId,
+        annotations: serializeAnnotations(commitText()),
+      });
       onNotify("图片已复制到剪贴板，可以直接粘贴");
     } catch (error) {
       onNotify(`复制失败：${String(error)}`);
@@ -334,7 +397,10 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
   }
 
   async function saveImage() {
+    if (processing) return;
+    setProcessing(true);
     try {
+      const current = commitText();
       const path = await save({
         defaultPath: `ScreenShot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`,
         filters: [{ name: "PNG 图片", extensions: ["png"] }],
@@ -342,10 +408,12 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
       if (!path) {
         return;
       }
-      setProcessing(true);
       onNotify("正在渲染并保存图片…");
-      const output = await renderCurrent();
-      await invoke("save_png", { path, dataUrl: output });
+      await invoke("save_capture", {
+        captureId: capture.captureId,
+        path,
+        annotations: serializeAnnotations(current),
+      });
       onNotify("PNG 已保存");
     } catch (error) {
       onNotify(`保存失败：${String(error)}`);
@@ -383,9 +451,9 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
           </span>
         </div>
         <div className="zoom-controls">
-          <button onClick={() => zoomBy(0.85)}>−</button>
+          <button aria-label="缩小截图" title="缩小" onClick={() => zoomBy(0.85)}>−</button>
           <output>{Math.round(zoom * 100)}%</output>
-          <button onClick={() => zoomBy(1.18)}>＋</button>
+          <button aria-label="放大截图" title="放大" onClick={() => zoomBy(1.18)}>＋</button>
           <button onClick={fitWidth}>适合宽度</button>
           <button onClick={fitAll}>显示全部</button>
         </div>
@@ -400,31 +468,34 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
       </header>
 
       <aside className="annotation-toolbar">
-        <ToolButton tool="pan" current={tool} setTool={setTool} icon="✥" label="移动" />
-        <ToolButton tool="arrow" current={tool} setTool={setTool} icon="↗" label="箭头" />
-        <ToolButton tool="rect" current={tool} setTool={setTool} icon="□" label="矩形" />
-        <ToolButton tool="pen" current={tool} setTool={setTool} icon="⌁" label="画笔" />
-        <ToolButton tool="mosaic" current={tool} setTool={setTool} icon="▦" label="打码" />
+        <ToolButton tool="pan" current={tool} setTool={selectTool} disabled={processing} icon="✥" label="移动" />
+        <ToolButton tool="arrow" current={tool} setTool={selectTool} disabled={processing} icon="↗" label="箭头" />
+        <ToolButton tool="rect" current={tool} setTool={selectTool} disabled={processing} icon="□" label="矩形" />
+        <ToolButton tool="pen" current={tool} setTool={selectTool} disabled={processing} icon="⌁" label="画笔" />
+        <ToolButton tool="mosaic" current={tool} setTool={selectTool} disabled={processing} icon="▦" label="打码" />
+        <ToolButton tool="text" current={tool} setTool={selectTool} disabled={processing} icon="T" label="文字" />
         <div className="toolbar-divider" />
         <label className="color-control" title="标注颜色">
-          <input type="color" value={color} onChange={(event) => setColor(event.target.value)} />
+          <input type="color" aria-label="标注颜色" disabled={processing} value={color} onChange={(event) => updateTextColor(event.target.value)} />
           <span style={{ background: color }} />
         </label>
-        <label className="stroke-control" title="线条粗细">
-          <span>{strokeWidth}</span>
+        <label className="stroke-control" title={tool === "text" ? "文字字号" : "线条粗细"}>
+          <span>{tool === "text" ? `${fontSize}px` : strokeWidth}</span>
           <input
             type="range"
-            min="2"
-            max="18"
-            value={strokeWidth}
-            onChange={(event) => setStrokeWidth(Number(event.target.value))}
+            aria-label={tool === "text" ? "文字字号" : "线条粗细"}
+            disabled={processing}
+            min={tool === "text" ? 12 : 2}
+            max={tool === "text" ? 96 : 18}
+            value={tool === "text" ? fontSize : strokeWidth}
+            onChange={(event) => tool === "text" ? updateFontSize(Number(event.target.value)) : setStrokeWidth(Number(event.target.value))}
           />
         </label>
         <div className="toolbar-divider" />
-        <button className="tool-button" onClick={undo} disabled={!annotations.length} title="撤销">
+        <button className="tool-button" onClick={undo} disabled={processing || (!annotations.length && !textDraft)} title="撤销" aria-label="撤销">
           <b>↶</b><small>撤销</small>
         </button>
-        <button className="tool-button" onClick={redo} disabled={!redoStack.length} title="重做">
+        <button className="tool-button" onClick={redo} disabled={processing || !!textDraft || !redoStack.length} title="重做" aria-label="重做">
           <b>↷</b><small>重做</small>
         </button>
       </aside>
@@ -466,8 +537,55 @@ function AnnotationEditor({ capture, onClose, onNotify }: Props) {
               <AnnotationShape key={index} annotation={annotation} />
             ))}
           </svg>
+          {textDraft && (
+            <textarea
+              ref={textInputRef}
+              className="text-entry"
+              aria-label="截图文字"
+              placeholder="输入文字"
+              maxLength={5000}
+              wrap="off"
+              spellCheck={false}
+              disabled={processing}
+              value={textDraft.text}
+              onChange={(event) => setTextDraft({ ...textDraft, text: event.target.value })}
+              onPointerDown={(event) => event.stopPropagation()}
+              onWheel={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                if (event.nativeEvent.isComposing) return;
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setTextDraft(null);
+                }
+              }}
+              style={{
+                left: textDraft.x,
+                top: textDraft.y,
+                width: Math.min(Math.max(240, textDraft.fontSize * 10), capture.width - textDraft.x),
+                height: Math.min(
+                  Math.max(2, textDraft.text.split("\n").length) * textDraft.fontSize * TEXT_LINE_HEIGHT + 4,
+                  capture.height - textDraft.y,
+                ),
+                color: textDraft.color,
+                fontFamily: TEXT_FONT_FAMILY,
+                fontSize: textDraft.fontSize,
+                lineHeight: TEXT_LINE_HEIGHT,
+              }}
+            />
+          )}
         </div>
-        <div className="viewport-help">滚轮缩放 · 空格/中键拖动 · Ctrl/Cmd+Z 撤销</div>
+        {textDraft ? (
+          <div className="text-entry-actions" onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
+            <span>Enter 换行 · Esc 取消</span>
+            <button className="secondary-button" disabled={processing} onClick={() => setTextDraft(null)}>取消</button>
+            <button className="primary-button" disabled={processing} onClick={() => {
+              try { commitText(); } catch (error) { onNotify(String(error)); }
+            }}>添加文字</button>
+          </div>
+        ) : (
+          <div className="viewport-help">{{text:"点击图片放置文字，输入后点“添加文字”",arrow:"按住鼠标拖动，画出箭头",rect:"按住鼠标拖动，框出重点",pen:"按住鼠标自由绘画",mosaic:"拖动覆盖需要隐藏的内容",pan:"按住鼠标拖动画面"}[tool]} · 滚轮缩放 · Ctrl/Cmd+Z 撤销</div>
+        )}
       </div>
     </main>
   );
@@ -479,18 +597,23 @@ function ToolButton({
   setTool,
   icon,
   label,
+  disabled,
 }: {
   tool: EditorTool;
   current: EditorTool;
   setTool: (tool: EditorTool) => void;
   icon: string;
   label: string;
+  disabled: boolean;
 }) {
   return (
     <button
       className={`tool-button ${current === tool ? "active" : ""}`}
       onClick={() => setTool(tool)}
       title={label}
+      aria-label={label}
+      disabled={disabled}
+      aria-pressed={current === tool}
     >
       <b>{icon}</b>
       <small>{label}</small>
@@ -499,6 +622,9 @@ function ToolButton({
 }
 
 function AnnotationShape({ annotation }: { annotation: Annotation }) {
+  if (annotation.type === "text") {
+    return <image x={annotation.x} y={annotation.y} width={annotation.width} height={annotation.height} href={annotation.dataUrl} />;
+  }
   if (annotation.type === "rect") {
     const rect = normalizedRect(annotation);
     return (

@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ScreenShot · 视频制作</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">▶</div>
+          <div>
+            <h1>视频制作</h1>
+            <p id="projectSubtitle">未打开项目</p>
+          </div>
+        </div>
+        <div class="toolbar"><span id="mediaStatus" class="item-meta">正在检查视频功能…</span><span id="projectSaveStatus" class="save-status" role="status">修改会自动保存</span>
+          <button class="secondary" id="newProjectBtn">新建项目</button>
+          <button class="secondary" id="saveProjectBtn">保存项目</button>
+          <button class="secondary" id="openProjectBtn">打开项目</button>
+          <details class="project-menu"><summary>更多</summary><div><button id="saveAsProjectBtn" class="secondary">项目另存为…</button><button id="revealProjectBtn" class="secondary">打开项目文件夹</button></div></details>
+        </div>
+      </header>
+
+      <section class="workflow-guide" aria-label="视频制作操作引导">
+        <ol class="workflow-steps"><li><button data-workflow-step="0">1 添加视频</button></li><li><button data-workflow-step="1">2 编辑文字 / 配音</button></li><li><button data-workflow-step="2">3 合成音视频</button></li><li><button data-workflow-step="3">4 预览并导出</button></li></ol>
+        <div class="workflow-next"><div><strong id="workflowTitle">先添加一个视频</strong><p id="workflowHint">可以导入已有视频，也可以直接录屏。项目会自动创建并保存。</p></div><button id="workflowNext" class="primary">导入视频</button></div>
+      </section>
+
+      <main class="workspace">
+        <aside class="sidebar">
+          <section class="panel">
+            <div class="panel-title">
+              <h2>视频素材（<span id="assetCount">0</span>）</h2>
+              <div class="panel-actions">
+                <button class="primary small" id="recordBtn">录屏</button>
+                <button class="secondary small" id="importBtn">导入视频</button>
+              </div>
+            </div>
+            <div class="list" id="assetList"></div>
+            <p class="panel-help">点击视频查看和编辑；拖动卡片调整顺序。</p>
+          </section>
+
+          <section class="panel inserted-text-panel">
+            <div class="panel-title">
+              <h2>插入文字详情（<span id="insertedTextCount">0</span>）</h2>
+            </div>
+            <div class="inserted-text-list" id="insertedTextList"></div>
+          </section>
+        </aside>
+
+        <section class="stage">
+          <div class="preview-head">
+            <div>
+              <h2 id="previewTitle">预览</h2>
+              <p id="previewMeta">请选择素材</p>
+              <p id="outputFeedback" class="output-feedback" hidden><span id="outputMessage"></span><button id="revealOutputBtn" class="text-button">打开文件位置</button></p>
+            </div>
+            <div class="preview-actions"><button class="secondary small" id="backToOriginalBtn" hidden>编辑原视频</button><button class="secondary small" id="insertTextBtn" disabled>插入文字</button></div>
+          </div>
+
+          <div class="video-frame">
+            <video id="videoPreview" controls></video>
+            <div class="text-overlay-layer" id="textOverlayLayer"></div>
+            <div class="text-style-panel" id="textStylePanel" hidden>
+              <select id="textFontSize" aria-label="文字大小">
+                <option value="12">12px</option>
+                <option value="14">14px</option>
+                <option value="16" selected>16px</option>
+                <option value="20">20px</option>
+                <option value="24">24px</option>
+                <option value="30">30px</option>
+                <option value="36">36px</option>
+                <option value="45">45px</option>
+              </select>
+              <span class="style-control" data-tooltip="设置文字颜色">
+                <input id="textColor" type="color" value="#ffffff" aria-label="设置文字颜色" title="设置文字颜色">
+              </span>
+              <span class="style-control" data-tooltip="设置文本框背景色">
+                <input id="textBgColor" type="color" value="#111827" aria-label="设置文本框背景色" title="设置文本框背景色">
+              </span>
+              <span class="style-control wide" data-tooltip="设置背景色透明度">
+                <input id="textBgOpacity" type="range" min="0" max="1" step="0.05" value="0.5" aria-label="设置背景色透明度" title="设置背景色透明度">
+              </span>
+              <button class="delete-icon-button" id="deleteTextOverlayBtn" title="删除文字" aria-label="删除文字">×</button>
+            </div>
+            <div class="empty-preview" id="emptyPreview">
+              <strong>添加视频，从这里开始</strong>
+              <span>点左上方“导入视频”或“录屏”，无需先建项目</span>
+            </div>
+          </div>
+
+          <div id="mergePanelDivider" class="merge-panel-divider" role="separator" tabindex="0" aria-label="调整音视频合并列表高度" aria-orientation="horizontal" aria-controls="mergePanel" title="上下拖动调整列表高度，双击恢复默认；也可用上下方向键调整"></div>
+          <div id="mergePanel" class="merge-panel">
+            <div class="panel-title">
+              <h2>音视频合并列表（<span id="queueCount">0</span>）</h2>
+              <div class="panel-actions">
+                <button class="secondary small" id="mergePreviewBtn">合并预览</button>
+                <button class="primary small" id="mergeBtn">合并导出</button>
+              </div>
+            </div>
+            <div class="queue" id="mergeQueue"></div>
+            <p id="mergeHelp" class="sort-help">勾选要导出的片段，拖动调整播放顺序；编号固定，手柄也可用方向键排序。</p>
+          </div>
+        </section>
+
+        <aside class="inspector">
+          <section class="panel script-panel">
+            <div class="panel-title">
+              <h2>旁白文字稿</h2>
+              <button class="secondary small" id="addSegmentBtn">添加</button>
+            </div>
+
+            <div class="script-body">
+              <p class="panel-help">填写旁白 → 生成语音 → 试听 → 合成。也可以只插入文字，跳过配音。</p>
+              <div class="segment-list" id="segmentList"></div>
+
+              <label class="field">
+                <span>旁白从哪一秒开始、在哪一秒结束</span>
+                <div class="time-fields">
+                  <input id="segmentStart" type="number" min="0" step="0.1" value="0" aria-label="旁白开始时间（秒）">
+                  <input id="segmentEnd" type="number" min="0" step="0.1" value="10" aria-label="旁白结束时间（秒）">
+                </div>
+              </label>
+
+              <label class="field">
+                <span>文字内容</span>
+                <textarea id="scriptText" rows="5" placeholder="写下想让配音朗读的话，例如：首先点击右上角的设置。"></textarea>
+              </label>
+
+              <label class="field"><span>语音来源</span><select id="voiceProvider"><option value="edge">Edge 中文女声 · 联网</option><option value="local">本机语音 · 离线</option></select><small class="voice-privacy">在线语音会将文字稿发送到语音服务；视频文件在本机处理。</small></label>
+              <label class="field">
+                <span>语速</span>
+                <select id="speedSelect">
+                  <option value="slow">较慢</option>
+                  <option value="normal" selected>正常</option>
+                  <option value="fast">较快</option>
+                  <option value="faster">很快</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="button-row">
+              <button class="secondary" id="generateVoiceBtn" title="把文字读成语音；再次生成会覆盖原语音">生成语音</button>
+              <button class="secondary" id="previewVoiceBtn" title="先生成语音，再试听">试听</button>
+              <button class="primary" id="synthesizeBtn" title="把当前视频、旁白和插入文字合成一个视频；再次合成会覆盖原结果">合成音视频</button>
+            </div>
+          </section>
+
+          <section class="panel history-panel">
+            <div class="panel-title">
+              <h2>语音列表（<span id="versionCount">0</span>）</h2>
+            </div>
+            <div class="version-section">
+              <div id="voiceVersions" class="version-list"></div>
+            </div>
+          </section>
+        </aside>
+      </main>
+    </div>
+
+    <dialog id="recordDialog" class="record-dialog">
+      <form method="dialog" class="record-card">
+        <div class="record-head">
+          <div>
+            <h2>录屏</h2>
+            <p id="recordTimer">00:00</p>
+          </div>
+          <button class="icon-button" value="cancel" id="closeRecordBtn" title="关闭">×</button>
+        </div>
+
+        <div class="record-grid">
+          <section>
+            <h3>录屏范围</h3>
+            <div class="segmented">
+              <label><input type="radio" name="captureMode" value="screen" checked> 全屏</label>
+              <label><input type="radio" name="captureMode" value="window"> 窗口</label>
+              <label><input type="radio" name="captureMode" value="area"> 自定义区域</label>
+            </div>
+            <div class="source-list" id="captureSources"></div>
+          </section>
+
+          <section>
+            <h3>选项</h3>
+            <div class="check-list">
+              <label class="resolution-option">
+                <span>录制分辨率</span>
+                <select id="recordResolution" aria-label="录制分辨率">
+                  <option value="1080" selected>1080p（1920×1080）</option>
+                  <option value="2k">2K（2560×1440）</option>
+                </select>
+              </label>
+              <label><input id="recordSystemAudio" type="checkbox" checked> 系统声音</label>
+              <label><input id="recordMic" type="checkbox"> 麦克风</label>
+              <label><input id="recordCursor" type="checkbox" checked> 鼠标指针</label>
+              <label><input id="recordClicks" type="checkbox" checked> 点击效果</label>
+              <label><input id="recordKeys" type="checkbox"> 键盘提示</label>
+            </div>
+
+            <div class="crop-grid">
+              <label>X<input id="cropX" type="number" min="0" value="0"></label>
+              <label>Y<input id="cropY" type="number" min="0" value="0"></label>
+              <label>W<input id="cropW" type="number" min="1" value="1280"></label>
+              <label>H<input id="cropH" type="number" min="1" value="720"></label>
+            </div>
+            <button class="secondary area-button" id="selectAreaBtn" type="button">框选区域</button>
+            <p class="area-hint" id="areaHint">选择“自定义区域”后可拖拽框选录制范围</p>
+          </section>
+        </div>
+
+        <div class="record-actions">
+          <button class="primary" id="startRecordBtn" type="button">开始录制</button>
+          <button class="danger" id="stopRecordBtn" type="button" disabled title="录制中可按 Command/Ctrl + Shift + X 或 F8 停止">停止录制</button>
+        </div>
+      </form>
+    </dialog>
+
+    <section id="textTimingPanel" class="text-timing-panel text-edit-popover" role="dialog" aria-labelledby="textEditorHeading" hidden>
+      <div class="text-editor-heading"><h2 id="textEditorHeading">编辑插入文字</h2><button id="closeTextEditor" type="button" class="icon-button" aria-label="关闭文字编辑">×</button></div>
+      <label class="text-content-field">文字内容<textarea id="textOverlayText" rows="3" aria-label="插入文字内容" placeholder="输入文字"></textarea></label>
+      <label>从第几秒出现<input id="textStartTime" type="number" min="0" step="0.001" aria-label="文字插入时间（秒）"></label>
+      <label>显示几秒<input id="textDuration" type="number" min="0.1" step="0.001" aria-label="文字显示时长（秒）"></label>
+      <span id="textEndTime" class="item-meta"></span>
+    </section>
+    <dialog id="deleteSegmentDialog" class="delete-confirm-dialog" aria-labelledby="deleteSegmentHeading">
+      <form method="dialog">
+        <h2 id="deleteSegmentHeading">删除文字稿</h2>
+        <p id="deleteSegmentMessage"></p>
+        <div class="button-row"><button class="secondary" value="cancel" autofocus>取消</button><button class="danger" value="delete">确认删除</button></div>
+      </form>
+    </dialog>
+    <div class="toast" id="toast" role="status"><span id="toastMessage"></span><button id="closeToast" aria-label="关闭提示">×</button></div>
+    <script src="./bridge.js"></script>
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>
