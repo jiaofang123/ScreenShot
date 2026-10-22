@@ -4,12 +4,19 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 
 type MediaPayload = Record<string, unknown>;
 export type StudioRecording = { path: string; projectRoot?: string };
-export default function StudioWorkspace({ visible, recording, onImported, onRecord, onNotify }: {
-  visible: boolean; recording: StudioRecording | null; onImported: () => void; onRecord: (project: { projectRoot: string }) => Promise<void>; onNotify: (message: string) => void;
+export default function StudioWorkspace({ visible, topCollapsed, recording, onImported, onRecord, onNotify }: {
+  visible: boolean; topCollapsed: boolean; recording: StudioRecording | null; onImported: () => void; onRecord: (project: { projectRoot: string }) => Promise<void>; onNotify: (message: string) => void;
 }) {
   const frame = useRef<HTMLIFrameElement>(null);
   const [ready, setReady] = useState(false);
   const [initialized, setInitialized] = useState(false);
+  const applyTopLayout = () => {
+    const target = frame.current?.contentWindow;
+    if (!target) return;
+    target.document.documentElement.classList.toggle("top-collapsed", topCollapsed);
+    target.dispatchEvent(new Event("resize"));
+  };
+  useEffect(applyTopLayout, [topCollapsed]);
   useEffect(() => {
     const call = async (method: string, payload: unknown = {}) => {
       const result = await invoke("studio_call", { method, payload });
@@ -61,6 +68,6 @@ export default function StudioWorkspace({ visible, recording, onImported, onReco
     if (target?.importRecording) void target.importRecording(recording.path, recording.projectRoot).then(onImported).catch(error => { onNotify(String(error)); onImported(); });
   }, [recording, initialized, onImported, onNotify]);
   return <section className="studio-workspace" hidden={!visible} aria-label="视频制作工作区">
-    {ready && <iframe ref={frame} title="视频制作" src="/studio/index.html" />}
+    {ready && <iframe ref={frame} title="视频制作" src="/studio/index.html" onLoad={applyTopLayout} />}
   </section>;
 }

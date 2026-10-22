@@ -24,6 +24,12 @@
 .editing-workspace .app-header h1 { font-size: 18px; }
 .editing-workspace .app-header p { font-size: 11px; }
 .editing-workspace .mode-tabs { margin: 0 0 8px; flex-shrink: 0; max-width: none; }
+.mode-tabs .studio-top-toggle { border-color: #31594a; color: #9cf1d0; padding-inline: 12px; }
+.editing-workspace.studio-top-collapsed { padding: 4px 8px 0; }
+.studio-top-collapsed .mode-tabs { gap: 4px; margin-bottom: 4px; }
+.studio-top-collapsed .mode-tabs button { padding: 6px 12px; font-size: 12px; }
+.studio-top-collapsed .mode-tabs button small { display: none; }
+.studio-top-collapsed .studio-top-toggle { margin-left: auto; }
 .studio-workspace { flex: 1; min-height: 0; width: 100%; }
 .studio-workspace[hidden] { display: none; }
 .studio-workspace iframe { display: block; width: 100%; height: 100%; border: 0; border-radius: 12px 12px 0 0; background: #101620; }

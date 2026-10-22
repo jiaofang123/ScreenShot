@@ -18,6 +18,10 @@ function App() {
   const [page, setPage] = useState<"capture" | "record" | "studio">("capture");
   const [studioOpened, setStudioOpened] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [studioTopCollapsed, setStudioTopCollapsed] = useState(() => {
+    try { return localStorage.getItem("screenshot-studio-top-collapsed") === "true"; }
+    catch { return false; }
+  });
   const [studioRecording, setStudioRecording] = useState<StudioRecording | null>(null);
   const studioController = useRef<string | null>(null), studioProject = useRef<string | undefined>(undefined);
   const preparingRecording = useRef(false), latestRecording = useRef<RecordingStatus | null>(null);
@@ -109,6 +113,12 @@ function App() {
     }
   }
 
+  function toggleStudioTop() {
+    const next = !studioTopCollapsed;
+    setStudioTopCollapsed(next);
+    try { localStorage.setItem("screenshot-studio-top-collapsed", String(next)); } catch { /* Keep the toggle usable when storage is unavailable. */ }
+  }
+
   if (capture) {
     return (
       <>
@@ -126,8 +136,8 @@ function App() {
   }
 
   return (
-    <main className={`home-shell ${page === "studio" ? "editing-workspace" : ""}`}>
-      <header className="app-header">
+    <main className={`home-shell ${page === "studio" ? `editing-workspace${studioTopCollapsed ? " studio-top-collapsed" : ""}` : ""}`}>
+      <header className="app-header" hidden={page === "studio" && studioTopCollapsed}>
         <div className="brand-mark" aria-hidden="true">
           <span />
         </div>
@@ -143,15 +153,16 @@ function App() {
         <button aria-label="录屏" aria-pressed={page === "record"} className={page === "record" ? "selected" : ""} onClick={() => switchPage("record")}>录屏<small aria-hidden="true">把屏幕录成视频</small></button>
         <button aria-label="视频制作" aria-pressed={page === "studio"} className={page === "studio" ? "selected" : ""} onClick={() => switchPage("studio")}>视频制作<small aria-hidden="true">加文字、配音、合并视频</small></button>
         {page === "studio" && <button onClick={() => { void invoke("toggle_studio_fullscreen").catch(error => setMessage(String(error))); }}>全屏 / 退出全屏</button>}
-        <button className="help-toggle" aria-expanded={showHelp} onClick={() => setShowHelp(value => !value)}>{showHelp ? "收起帮助" : "使用帮助"}</button>
+        <button className="help-toggle" hidden={page === "studio" && studioTopCollapsed} aria-expanded={showHelp} onClick={() => setShowHelp(value => !value)}>{showHelp ? "收起帮助" : "使用帮助"}</button>
+        {page === "studio" && <button className="studio-top-toggle" aria-expanded={!studioTopCollapsed} onClick={toggleStudioTop} title={studioTopCollapsed ? "展开项目操作和步骤引导" : "收起顶部说明、项目操作和步骤引导，扩大编辑区"}><span aria-hidden="true">{studioTopCollapsed ? "⌄" : "⌃"}</span> {studioTopCollapsed ? "展开顶部" : "收起顶部"}</button>}
       </nav>
-      {showHelp && <section className="usage-guide" aria-label="使用帮助">
+      {showHelp && !(page === "studio" && studioTopCollapsed) && <section className="usage-guide" aria-label="使用帮助">
         <div><strong>截图</strong><p>开始截图 → 拖动框选。拖动四角可调整，按 Enter 直接复制；需要标注时点“编辑截图”。</p></div>
         <div><strong>录屏</strong><p>选择窗口、屏幕或区域 → 开始录屏。窗口会自动收起，用菜单栏图标或停止快捷键结束，视频自动保存。</p></div>
         <div><strong>视频制作</strong><p>导入或录制视频 → 写稿并生成语音，也可只插入文字 → 合成音视频 → 合并预览 → 合并导出。修改自动保存。</p></div>
       </section>}
 
-      {studioOpened && <StudioWorkspace visible={page === "studio"} recording={studioRecording} onImported={importedRecording} onRecord={requestRecording} onNotify={setMessage} />}
+      {studioOpened && <StudioWorkspace visible={page === "studio"} topCollapsed={studioTopCollapsed} recording={studioRecording} onImported={importedRecording} onRecord={requestRecording} onNotify={setMessage} />}
       {page === "record" ? <RecordingPanel onNotify={setMessage} onEditVideo={recordingToStudio} /> : page === "capture" ? <>
 
       <section className="hero-card">

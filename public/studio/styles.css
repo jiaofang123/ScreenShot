@@ -1208,6 +1208,8 @@ textarea { resize:vertical; }.text-style-panel { color:#dce6f2; background:#1929
 
 /* Keep the next action visible while each editing panel scrolls independently. */
 .app-shell { grid-template-rows: auto auto minmax(0, 1fr); }
+.top-collapsed .app-shell { grid-template-rows: minmax(0, 1fr); }
+.top-collapsed .topbar, .top-collapsed .workflow-guide { display: none; }
 .topbar { min-height: 52px; flex-wrap: wrap; }
 .toolbar { flex-wrap: wrap; justify-content: flex-end; }
 .save-status { color: var(--green); font-size: 11px; }
