@@ -1103,7 +1103,10 @@ async function generateVoiceWithWindowsSapi(values) {
     }
 
     const listContent = mergeItems
-      .map((item) => `file '${String(item.path).replaceAll("\\", "/").replace(/'/g, "'\\''")}'`)
+      .map((item) => {
+        const file = process.platform === 'win32' ? String(item.path).replaceAll("\\", "/") : String(item.path);
+        return `file '${file.replace(/'/g, "'\\''")}'`;
+      })
       .join(os.EOL);
     await writeFile(listFile, `${listContent}${os.EOL}`);
 
