@@ -9,7 +9,7 @@
 | 视频文字、时间范围、合并预览和比例修复 | 共用 FFmpeg 处理，Windows 包使用 ffmpeg.exe | 修正合并清单路径分隔符、Windows 系统字体目录及 Rust FFmpeg 文件名；尚需 Windows 编码及中文字体真机验证 |
 | 顶部折叠、列表拖拽、固定编号、分割线、文字卡片浮层 | 共用 DOM、CSS、Pointer Events、ResizeObserver、localStorage | Chromium/WebKit 验证交互；未代替 Windows WebView2 的实际运行 |
 | 窗口、桌面、区域、标签页录屏、2K、继续录制 | Windows 使用 Chrome/Edge 浏览器兼容录屏；有 Windows 浏览器发现及启动分支 | 需浏览器授权；共享声音受浏览器和所选来源限制。窗口/屏幕通过系统共享面板选择，区域在共享预览中框选 |
-| 鼠标和点击效果开关 | 新增开关目前接入 macOS 原生录制 | Windows 浏览器录屏没有同等的可控指针及点击效果功能；不能声称已适配 |
+| 原生鼠标、点击效果和麦克风选项 | 开关目前接入 macOS 原生录制 | Windows 浏览器录屏没有同等的可控指针、点击效果和麦克风录入功能；不能声称已适配 |
 | 排除 ScreenShot 和录屏控制窗口 | Windows 为 Tauri 工具及截图窗口设置内容保护；浏览器录制排除控制标签页 | Windows 整屏录制不能获得 macOS 按应用/窗口过滤的同等保证，独立 Chrome/Edge 控制窗口也没有相同的原生排除实现 |
 | 程序坞重新唤起 | 属于 macOS Reopen 事件 | Windows 使用任务栏/托盘入口，需实机验证最小化、隐藏和恢复 |
 | 安装包 | 有 NSIS 打包配置、Windows Node/FFmpeg 运行时准备分支 | 当前整合版尚未在 Windows 重新构建和安装验收；Mac 的 .app 不能用于 Windows |
