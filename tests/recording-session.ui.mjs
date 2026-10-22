@@ -123,6 +123,7 @@ try {
   await page.getByRole('button',{name:'开始录屏',exact:true}).click();
   await page.getByText('本次录屏已开始',{exact:true}).waitFor({timeout:10000});
   const native=await page.evaluate(()=>window.calls.findLast(call=>call.cmd==='start_native_recording'));
+  assert.equal(native.args.source.cursor,true);assert.equal(native.args.source.clicks,true);assert.equal(native.args.source.microphone,false);
   assert.equal(native.args.options.resolution,'2k');
   assert.match(native.args.path,/^\/Users\/test\/screenshot\/\d{4}-\d{2}-\d{2}\/current.mp4$/);
   await page.getByRole('button',{name:'停止并保存',exact:true}).click();await settle();

@@ -22,7 +22,7 @@ export default function RecordingPanel({onNotify,onEditVideo,defaultEditAfter=fa
   const [status,setStatus]=useState<Status|null>(null),[error,setError]=useState("");
   const [loading,setLoading]=useState(false),[busy,setBusy]=useState(false),[countdown,setCountdown]=useState(0);
   const [selecting,setSelecting]=useState(false);
-  const [fps,setFps]=useState(30),[quality,setQuality]=useState("1080p"),[audio,setAudio]=useState(true),[microphone,setMicrophone]=useState(false),[cursor,setCursor]=useState(true),[clicks,setClicks]=useState(false);
+  const [fps,setFps]=useState(30),[quality,setQuality]=useState("1080p"),[audio,setAudio]=useState(true),[microphone,setMicrophone]=useState(false),[cursor,setCursor]=useState(true),[clicks,setClicks]=useState(true);
   const [crop,setCrop]=useState<Crop|null>(null);
   const [editAfter,setEditAfter]=useState(defaultEditAfter);
   const editAfterRef=useRef(defaultEditAfter),completed=useRef(new Set<string>());

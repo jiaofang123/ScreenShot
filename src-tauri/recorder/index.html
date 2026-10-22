@@ -20,6 +20,7 @@
         <label>画质<select id="quality"><option value="1080p">最高 1080p</option><option value="2k">最高 2K（2560 × 1440）</option><option value="4k">最高 4K</option></select></label>
         <label class="audio-option"><input id="audio" type="checkbox" />录制共享声音</label>
         <div id="native-target" class="native-target" hidden><label>录制目标<select id="target" aria-label="录制目标"></select></label><button id="refresh" type="button">刷新来源</button><button id="select-region" type="button" hidden>框选录制区域</button><span id="region-size" class="muted"></span></div>
+        <details id="native-advanced" class="native-advanced" hidden><summary>更多设置：鼠标与点击效果</summary><div class="pointer-options"><label><input id="cursor" type="checkbox" checked />显示鼠标指针</label><label><input id="clicks" type="checkbox" checked />显示点击效果</label></div><p>适用于本机窗口、屏幕和区域录制。点击效果需要 macOS 15 或以上版本。</p></details>
       </fieldset>
       <div id="notice" role="status" class="notice" hidden></div>
       <div class="controls">

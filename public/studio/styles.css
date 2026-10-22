@@ -1247,7 +1247,12 @@ textarea { resize:vertical; }.text-style-panel { color:#dce6f2; background:#1929
 .toast button { padding: 1px 5px; background: transparent; color: inherit; font-size: 20px; }
 button:focus-visible, summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .stage .merge-panel { overflow: auto; }
-.stage { grid-template-rows: auto minmax(150px, 1fr) clamp(200px, 28vh, 260px); }
+.stage { grid-template-rows: auto minmax(0, 1fr) 10px var(--merge-panel-height, clamp(200px, 28vh, 260px)); }
+.merge-panel-divider { display: grid; place-items: center; cursor: row-resize; touch-action: none; background: #152333; border-block: 1px solid #32465b; }
+.merge-panel-divider::after { content: ''; width: 42px; height: 3px; border-radius: 2px; background: #7f98ac; }
+.merge-panel-divider:hover, .merge-panel-divider:focus-visible, .resizing-merge .merge-panel-divider { background: #254337; outline: none; border-color: #72e0ba; }
+.merge-panel-divider:hover::after, .merge-panel-divider:focus-visible::after, .resizing-merge .merge-panel-divider::after { background: #9cf1d0; }
+.resizing-merge, .resizing-merge * { cursor: row-resize !important; user-select: none !important; }
 @media (max-width: 1100px) {
   .brand p { max-width: 180px; }
   .toolbar { gap: 4px; }

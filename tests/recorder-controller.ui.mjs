@@ -44,10 +44,15 @@ await page.addInitScript(()=>{
 try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   await page.waitForFunction(()=>!document.getElementById('choose').disabled);
+  await page.locator('#native-advanced summary').click();
+  assert.equal(await page.locator('#cursor').isChecked(),true);
+  assert.equal(await page.locator('#clicks').isChecked(),true);
   for(const mode of ['window','desktop','region','window']) {
     await page.locator('#quality').selectOption('2k');
     await page.locator('#mode').selectOption(mode);
     await page.waitForFunction(mode=>document.getElementById('target').value===(mode==='window'?'10':'20'),mode);
+    const cursor = mode !== 'desktop' && round < 3, clicks = mode !== 'desktop';
+    await page.locator('#cursor').setChecked(cursor);await page.locator('#clicks').setChecked(clicks);
     if(mode==='region') {
       await page.locator('#select-region').click();
       await page.waitForFunction(()=>!document.getElementById('settings').disabled);
@@ -62,6 +67,8 @@ try {
     const begin=requests.filter(item=>item.route==='native-begin').at(-1);
     assert.equal(status.options.resolution,'2k');
     assert.equal(begin.data.sourceId,mode==='window'?10:20);
+    assert.equal(begin.data.cursor,cursor);assert.equal(begin.data.clicks,clicks);assert.equal(begin.data.microphone,false);
+    assert.equal(await page.locator('#clicks').isDisabled(),true);
     assert.deepEqual(begin.data.crop,mode==='region'?{x:.1,y:.2,width:.5,height:.4}:null);
     await page.locator('#pause').click();await page.getByText('已暂停',{exact:true}).waitFor();
     await page.locator('#pause').click();await page.getByText('录制中',{exact:true}).waitFor();
@@ -71,6 +78,7 @@ try {
   }
   await page.locator('#mode').selectOption('tab');
   await page.waitForFunction(()=>document.getElementById('native-target').hidden);
+  assert.equal(await page.locator('#native-advanced').isVisible(),false);
   await page.evaluate(()=>window.nativeEvent({controllerClosed:true}));
   assert.equal(await page.evaluate(()=>window.closedControllers),1);
   assert.equal(await page.locator('#choose').isDisabled(),true);

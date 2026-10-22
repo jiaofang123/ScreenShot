@@ -226,6 +226,7 @@ async function refreshNativeSources() {
     region:config?.nativeCapture?'先选择屏幕，再点“框选录制区域”。拖动框选、四角调整，按 Enter 确认后再开始录制。':'先共享屏幕，再在预览中框选。拖动四角可调整范围，最后点击“开始录制选区”。'
   }[$('mode').value];
   $('native-target').hidden = !usesNative();
+  $('native-advanced').hidden = !usesNative();
   $('select-region').hidden = !usesNative() || $('mode').value !== 'region';
   $('title').textContent = `录制${names[$('mode').value]}`;
   if (!usesNative()) { setPhase(phase); return; }
@@ -243,7 +244,7 @@ async function startNative() {
     notice(`${seconds} 秒后开始录制…`); await new Promise(resolve => setTimeout(resolve,1000));
     if (stopRequested) { await api('cancel'); setPhase('cancelled'); return; }
   }
-  await api('native-begin', { sourceId:target.id, name:target.name, crop:config.options.mode === 'region' ? nativeCrop : null, microphone:false, cursor:true, clicks:false });
+  await api('native-begin', { sourceId:target.id, name:target.name, crop:config.options.mode === 'region' ? nativeCrop : null, microphone:false, cursor:$('cursor').checked, clicks:$('clicks').checked });
   notice('正在启动本机录制，工具和控制窗口将从画面中排除…');
 }
 $('mode').onchange = () => {

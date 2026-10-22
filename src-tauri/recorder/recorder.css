@@ -22,6 +22,12 @@ h2 { margin: 12px 0 0; font-size: 25px; }
 .mode-help { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid #72e0ba; border-radius: 4px; background: #172821; color: #b5d8ca; font-size: 12px; line-height: 1.8; }
 .native-target { display: flex; width: 100%; flex-wrap: wrap; align-items: center; gap: 12px; }
 .native-target select { max-width: min(480px, 60vw); }
+.native-advanced { width: 100%; padding: 12px 14px; border: 1px solid #334455; border-radius: 9px; color: #b8c5d5; font-size: 12px; }
+.native-advanced summary { cursor: pointer; }
+.pointer-options { display: flex; flex-wrap: wrap; gap: 24px; margin-top: 14px; }
+.pointer-options input { accent-color: #72e0ba; }
+.native-advanced p { color: #8f9faf; font-size: 11px; line-height: 1.7; margin: 12px 0 0; }
+.native-advanced summary:focus-visible { outline: 2px solid #72e0ba; outline-offset: 3px; }
 button { color: inherit; font: inherit; font-size: 13px; border: 1px solid #3a4655; border-radius: 9px; padding: 11px 18px; background: #1c2633; cursor: pointer; }
 button:hover { filter: brightness(1.13); }
 button:disabled { opacity: .5; cursor: wait; }

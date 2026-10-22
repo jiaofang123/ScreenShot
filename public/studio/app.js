@@ -1,4 +1,5 @@
 import { attachSortable } from './sortable.js';
+import { attachMergePanelResize } from './mergePanelResize.js';
 const $ = (id) => document.getElementById(id);
 const TEXT_OVERLAY_PLACEHOLDER = "输入文字";
 const TEXT_OVERLAY_DEFAULT_DURATION = 2;
@@ -2821,6 +2822,7 @@ function updateRecordTimer() {
 }
 
 function attachEvents() {
+  attachMergePanelResize(document.querySelector('.stage'), $('mergePanelDivider'), renderTextOverlays);
   attachSortable(els.assetList, { selector: '[data-asset-id]', id: card => card.dataset.assetId, commit: ids => {
     if (!state.project) return;
     const assets = new Map(state.project.assets.map(asset => [asset.id, asset]));
